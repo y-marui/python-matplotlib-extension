@@ -236,6 +236,20 @@ repos:
         require_serial: true
 
   # ----------------------------------------------------------------
+  # Charter doc links (adopting repos only)
+  # (docs/dev-charter/... paths mentioned in this repo's own Markdown
+  # must actually resolve — catches referencing a not-yet-synced path)
+  # ----------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: check-charter-doc-links
+        name: Check charter doc links
+        language: script
+        entry: scripts/check-charter-doc-links.sh
+        pass_filenames: false
+        always_run: true
+
+  # ----------------------------------------------------------------
   # PowerShell scripts
   # (PSScriptAnalyzer, installed locally on first run. Skipped in CI —
   # see ci.yml's SKIP env — it isn't required to gate merges; it exists
