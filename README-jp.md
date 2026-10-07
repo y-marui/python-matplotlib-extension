@@ -88,7 +88,7 @@ savefig(fig, "figure.mplpkg")  # 内部検証・高度な用途向けraw canonic
 
 現在の round-trip 対象は、基本的な `Figure`、`Axes`、`Line2D`、`Text`、`Legend`、scale、locator、formatter。未対応 object は `UnsupportedFigureWarning` とともに skip する。scatter と image の numeric data は `matplotlib_extension.recover_data()` で回収でき、artist coverage の拡張は [Issue #31](https://github.com/y-marui/python-matplotlib-extension/issues/31) で管理する。
 
-trust boundary の詳細は [format specification](docs/EDITABLE_FORMAT.md) と [security policy](SECURITY.md) を参照。
+trust boundary の詳細は [format specification](docs/EDITABLE_FORMAT.md)（[Security Boundary](docs/EDITABLE_FORMAT.md#security-boundary) 節を含む）を、脆弱性の報告方法は [security policy](SECURITY.md) を参照。
 
 ### LabelString
 

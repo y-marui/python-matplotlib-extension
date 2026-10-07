@@ -88,7 +88,7 @@ The format never restores a serialized Python object. It uses canonical JSON and
 
 Current round-trip support covers basic `Figure`, `Axes`, `Line2D`, `Text`, `Legend`, scales, locators, and formatters. Unsupported objects are skipped with `UnsupportedFigureWarning`. Numeric scatter and image data can still be retrieved with `matplotlib_extension.recover_data()`; broader artist coverage is tracked in [issue #31](https://github.com/y-marui/python-matplotlib-extension/issues/31).
 
-See the [format specification](docs/EDITABLE_FORMAT.md) and [security policy](SECURITY.md) for the exact trust boundary.
+See the [format specification](docs/EDITABLE_FORMAT.md) (including its [Security Boundary](docs/EDITABLE_FORMAT.md#security-boundary) section) for the exact trust boundary, and the [security policy](SECURITY.md) for how to report a vulnerability.
 
 ### LabelString
 
