@@ -32,6 +32,16 @@ PPTX package生成とOLE bytesの埋め込みはportable OOXML処理としてMac
 - **OSS 言語ポリシー:** 公開面（README・docstring・コミット）は英語、内部コメントは日本語 OK
 - **dev-charter の変更:** `docs/dev-charter/` 配下のファイルを直接編集しない。変更が必要な場合は dev-charter リポジトリに Issue を立て、`git subtree pull` でアップデートを取り込む
 
+### Charter Lookup
+
+不明点が憲章に関係する場合は**全ファイルを検索せず**、以下の手順で参照する:
+
+1. `docs/dev-charter/CHARTER_INDEX.md` を読み、該当トピックのファイルを特定する
+2. 特定したファイル（原則 1〜2 件）のみを読む
+3. 参照後にユーザーへ提案・確認を行う
+
+推測で断定せず、憲章を参照してからユーザーに提案・質問する。
+
 ## Document Sync Rule
 
 仕様・ルール・構成に変更が生じたとき、変更と同じ作業内で関連ドキュメントを更新する。
