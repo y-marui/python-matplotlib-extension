@@ -44,7 +44,7 @@ jobs:
               - '!.github/workflows/auto-assign-self.yml'
               # dev-charter 配布ファイル（git subtree 更新 PR が持ち込む）
               - '!.pre-commit-config.yaml'
-              - '!scripts/{check-ai-context-reference,check-charter-ci-template,check-charter-doc-links,check-charter-subtree-edit,check-conventional-commit,check-dotenv-gitignore,check-language-pair-footer,check-language-pair-sync,check-license-exists,check-local-charter-version,check-markdown-heading-language,check-not-on-default-branch,check-powershell-lint,check-python-package-management,check-readme-placeholders,check-version-date,new-branch}.{sh,ps1}'
+              - '!scripts/{check-ai-context-reference,check-charter-ci-template,check-charter-doc-links,check-charter-subtree-edit,check-conventional-commit,check-dotenv-gitignore,check-hook-scripts,check-language-pair-footer,check-language-pair-sync,check-license-exists,check-local-charter-version,check-markdown-heading-language,check-not-on-default-branch,check-powershell-lint,check-python-package-management,check-readme-placeholders,check-version-date,new-branch}.{sh,ps1}'
               - '!scripts/PSScriptAnalyzerSettings.psd1'
 
   security:
@@ -74,10 +74,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: ${{ !(vars.LINUX_RUNNER && !github.event.pull_request.head.repo.fork) }}
       - run: uv sync --group dev
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy matplotlib_extension
+      - name: Prune local uv cache
+        if: ${{ always() && vars.LINUX_RUNNER && !github.event.pull_request.head.repo.fork }}
+        run: uv cache prune --ci
 
   test:
     name: Test
@@ -92,9 +97,13 @@ jobs:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.3
         with:
+          enable-cache: ${{ !(vars.LINUX_RUNNER && !github.event.pull_request.head.repo.fork) }}
           python-version: ${{ matrix.python-version }}
       - run: uv sync --group dev
       - run: uv run pytest
+      - name: Prune local uv cache
+        if: ${{ always() && vars.LINUX_RUNNER && !github.event.pull_request.head.repo.fork }}
+        run: uv cache prune --ci
 
   build:
     name: Build
@@ -105,8 +114,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: ${{ !(vars.LINUX_RUNNER && !github.event.pull_request.head.repo.fork) }}
       - run: uv sync
       - run: uv run python -c "import matplotlib_extension"
+      - name: Prune local uv cache
+        if: ${{ always() && vars.LINUX_RUNNER && !github.event.pull_request.head.repo.fork }}
+        run: uv cache prune --ci
 
   gate:
     name: CI
