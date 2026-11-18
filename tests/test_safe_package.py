@@ -1,5 +1,6 @@
 import hashlib
 import json
+import warnings
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -11,6 +12,9 @@ import numpy as np
 import olefile
 import pytest
 from matplotlib.axes import Axes
+from matplotlib.collections import PathCollection
+from matplotlib.colors import ListedColormap
+from matplotlib.image import AxesImage
 from matplotlib.lines import Line2D
 from matplotlib.projections import register_projection
 from matplotlib.scale import LinearScale, register_scale
@@ -25,6 +29,7 @@ from matplotlib_extension.package import (
     dump_package,
     inspect_package,
     load_package,
+    recover_numeric_data,
 )
 from matplotlib_extension.pyplot import loadfig, recover_data, savefig
 
@@ -68,7 +73,7 @@ def test_package_is_deterministic_and_data_only() -> None:
             info.compress_type == zipfile.ZIP_STORED for info in archive.infolist()
         )
         figure_spec = json.loads(archive.read("figure.json"))
-        assert figure_spec["schema_version"] == 1
+        assert figure_spec["schema_version"] == 2
     assert inspect_package(first)["format_version"] == 1
     plt.close(fig)
 
@@ -232,9 +237,19 @@ def test_unsupported_subclass_is_warned_and_skipped() -> None:
     plt.close(restored)
 
 
-def test_scatter_numeric_data_remains_recoverable(tmp_path: Path) -> None:
+def test_scatter_with_unrecognized_colormap_remains_recoverable(
+    tmp_path: Path,
+) -> None:
     fig, ax = plt.subplots()
-    ax.scatter([1.0, 2.0], [3.0, 4.0], s=[5.0, 6.0], c=[7.0, 8.0], label="samples")
+    custom_cmap = ListedColormap(["red", "green", "blue"])
+    ax.scatter(
+        [1.0, 2.0],
+        [3.0, 4.0],
+        s=[5.0, 6.0],
+        c=[7.0, 8.0],
+        cmap=custom_cmap,
+        label="samples",
+    )
     path = tmp_path / "scatter.mpl.png"
 
     with pytest.warns(UnsupportedFigureWarning, match="Stored raw numeric data"):
@@ -247,7 +262,152 @@ def test_scatter_numeric_data_remains_recoverable(tmp_path: Path) -> None:
     np.testing.assert_allclose(records[0]["offsets"], [[1.0, 3.0], [2.0, 4.0]])
     np.testing.assert_allclose(records[0]["sizes"], [5.0, 6.0])
     np.testing.assert_allclose(records[0]["values"], [7.0, 8.0])
+    restored = load_package(dump_package(fig))
+    assert len(restored.axes[0].collections) == 0
+    assert inspect_package(dump_package(fig))["warnings"] == [
+        "Stored raw numeric data for unsupported PathCollection; artist skipped"
+    ]
     plt.close(fig)
+    plt.close(restored)
+
+
+def test_scatter_with_nonstandard_marker_remains_recoverable(tmp_path: Path) -> None:
+    fig, ax = plt.subplots()
+    ax.scatter(
+        [1.0, 2.0], [3.0, 4.0], s=[5.0, 6.0], c="red", marker=(5, 1, 20), label="poly"
+    )
+    path = tmp_path / "scatter.mpl.png"
+
+    with pytest.warns(UnsupportedFigureWarning, match="Stored raw numeric data"):
+        savefig(fig, path)
+
+    records = recover_data(path)
+    assert len(records) == 1
+    assert records[0]["artist_type"] == "PathCollection"
+    assert records[0]["label"] == "poly"
+    plt.close(fig)
+
+
+def test_scatter_with_explicit_colors_round_trips_exactly() -> None:
+    fig, ax = plt.subplots()
+    ax.scatter(
+        [1.0, 2.0, 3.0],
+        [4.0, 5.0, 6.0],
+        s=[10.0, 20.0, 30.0],
+        c="red",
+        marker="^",
+        edgecolors="blue",
+        linewidths=2.0,
+        alpha=0.5,
+        label="triangles",
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnsupportedFigureWarning)
+        payload = dump_package(fig)
+
+    assert inspect_package(payload)["warnings"] == []
+    restored = load_package(payload)
+    collections = restored.axes[0].collections
+    assert len(collections) == 1
+    collection = collections[0]
+    assert type(collection) is PathCollection
+    assert collection.get_label() == "triangles"
+    np.testing.assert_allclose(
+        collection.get_offsets(), [[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]]
+    )
+    np.testing.assert_allclose(collection.get_sizes(), [10.0, 20.0, 30.0])
+    np.testing.assert_allclose(collection.get_linewidth(), [2.0])
+    np.testing.assert_allclose(collection.get_facecolor(), [[1.0, 0.0, 0.0, 0.5]])
+    np.testing.assert_allclose(collection.get_edgecolor(), [[0.0, 0.0, 1.0, 0.5]])
+    assert collection.get_alpha() == 0.5
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_scatter_with_colormap_round_trips_exactly() -> None:
+    fig, ax = plt.subplots()
+    ax.scatter(
+        [1.0, 2.0, 3.0],
+        [4.0, 5.0, 6.0],
+        s=25.0,
+        c=[7.0, 8.0, 9.0],
+        cmap="plasma",
+        marker="o",
+        label="mapped",
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnsupportedFigureWarning)
+        payload = dump_package(fig)
+
+    assert inspect_package(payload)["warnings"] == []
+    assert recover_numeric_data(payload) == []
+    restored = load_package(payload)
+    collection = restored.axes[0].collections[0]
+    assert type(collection) is PathCollection
+    np.testing.assert_allclose(collection.get_sizes(), [25.0])
+    np.testing.assert_allclose(collection.get_array(), [7.0, 8.0, 9.0])
+    assert collection.get_cmap().name == "plasma"
+    assert collection.norm.vmin == 7.0
+    assert collection.norm.vmax == 9.0
+    collection.update_scalarmappable()
+    expected_facecolor = plt.get_cmap("plasma")(np.array([0.0, 0.5, 1.0]))
+    np.testing.assert_allclose(
+        collection.get_facecolor(), expected_facecolor, atol=1e-6
+    )
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_imshow_round_trips_exactly() -> None:
+    fig, ax = plt.subplots()
+    data = np.array([[1.0, 2.0], [3.0, 4.0]])
+    ax.imshow(
+        data,
+        cmap="viridis",
+        origin="lower",
+        interpolation="nearest",
+        extent=(0.0, 2.0, 0.0, 2.0),
+        alpha=0.75,
+        label="grid",
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnsupportedFigureWarning)
+        payload = dump_package(fig)
+
+    assert inspect_package(payload)["warnings"] == []
+    restored = load_package(payload)
+    images = restored.axes[0].images
+    assert len(images) == 1
+    image = images[0]
+    assert type(image) is AxesImage
+    np.testing.assert_allclose(image.get_array(), data)
+    assert image.get_interpolation() == "nearest"
+    assert image.origin == "lower"
+    assert image.get_extent() == [0.0, 2.0, 0.0, 2.0]
+    assert image.get_alpha() == 0.75
+    assert image.get_cmap().name == "viridis"
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_imshow_rgb_round_trips_exactly() -> None:
+    fig, ax = plt.subplots()
+    data = np.zeros((2, 2, 3))
+    data[0, 0] = [1.0, 0.0, 0.0]
+    ax.imshow(data)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnsupportedFigureWarning)
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    image = restored.axes[0].images[0]
+    np.testing.assert_allclose(image.get_array(), data)
+    plt.close(fig)
+    plt.close(restored)
 
 
 def test_legacy_object_attachment_is_never_restored(tmp_path: Path) -> None:
@@ -304,4 +464,38 @@ def test_restore_does_not_use_mutable_class_registries() -> None:
         mscale._scale_has_axis_parameter["linear"] = original_has_axis
 
     plt.close(fig)
+    plt.close(restored)
+
+
+_FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "scatter_imshow_matplotlib-3.10.0.mplpkg",
+        "scatter_imshow_matplotlib-3.11.2.mplpkg",
+    ],
+)
+def test_cross_version_scatter_imshow_fixture_restores_exactly(
+    fixture_name: str,
+) -> None:
+    payload = (_FIXTURES_DIR / fixture_name).read_bytes()
+
+    restored = load_package(payload)
+
+    collection = restored.axes[0].collections[0]
+    assert type(collection) is PathCollection
+    np.testing.assert_allclose(
+        collection.get_offsets(), [[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]]
+    )
+    np.testing.assert_allclose(collection.get_array(), [7.0, 8.0, 9.0])
+    assert collection.get_cmap().name == "plasma"
+
+    image = restored.axes[0].images[0]
+    assert type(image) is AxesImage
+    np.testing.assert_allclose(image.get_array(), [[1.0, 2.0], [3.0, 4.0]])
+    assert image.get_cmap().name == "viridis"
+    assert image.origin == "lower"
+    assert image.get_interpolation() == "nearest"
     plt.close(restored)

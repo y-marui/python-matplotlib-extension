@@ -2,7 +2,7 @@
 
 ## Status
 
-This document defines format version 1 and figure schema version 1. Both versions are integers and are validated independently. Readers reject unknown versions; they do not guess or fall back to object deserialization.
+This document defines format version 1 and figure schema version 2. Both versions are integers and are validated independently. Readers reject unknown versions; they do not guess or fall back to object deserialization.
 
 ## Canonical Package
 
@@ -40,15 +40,27 @@ The restore model is allowlist-first at every discriminator. There is no denylis
 
 Restoration and editing always occur in a Python process. "Editable" means that a plot saved in one process can be passed to another Python process or console, restored with `loadfig()`, and modified using normal Matplotlib APIs. A container is never an editing runtime and cannot request execution of code.
 
-Schema version 1 supports:
+Schema version 2 supports:
 
 - exact `Figure` and `Axes` classes;
 - exact `Line2D` and `Text` classes;
+- exact `PathCollection` instances created by `Axes.scatter()`, and exact `AxesImage` instances created by `Axes.imshow()` (see [Scatter and Image Restore](#scatter-and-image-restore));
 - basic legends and figure/axes labels;
 - linear, log, symlog, logit, and asinh scale names using Matplotlib's built-in scale selection;
 - explicit allowlists for common built-in locators and formatters.
 
-Subclasses and unsupported transforms are skipped while saving and recorded as `UnsupportedFigureWarning` plus manifest warnings. They are never restored by importing their class name. Schema version 1 stores numeric recovery records for exact `PathCollection` and `AxesImage` instances; `recover_data()` returns those arrays without constructing the unsupported artist. Future schemas may add more explicit recovery records.
+Subclasses and unsupported transforms are skipped while saving and recorded as `UnsupportedFigureWarning` plus manifest warnings. They are never restored by importing their class name. A `PathCollection` or `AxesImage` that does not fit the exact, allowlisted shape described below falls back to the schema version 1 behavior: the artist is skipped with a warning, and a numeric recovery record is stored so `recover_data()` can still return its raw arrays without constructing the artist. Future schemas may add more explicit recovery records.
+
+### Scatter and Image Restore
+
+In addition to numeric recovery records, schema version 2 can reconstruct the visible artist itself for two common plot types, each gated by explicit, exact allowlists — never a denylist, dynamic registry lookup, or construction from a file-selected name:
+
+- **`PathCollection` (`Axes.scatter()`):** restored when the collection uses exactly one marker path that matches one of Matplotlib's standard marker symbols (the keys of `matplotlib.markers.MarkerStyle.markers`, the same allowlist already used for `Line2D` markers — identified by comparing the collection's transformed `Path` against each candidate symbol's generated path, since a `PathCollection` does not otherwise retain the marker symbol it was built from). Offsets, per-point or uniform sizes, linewidths, and resolved edge colors are stored as `.npy` arrays. Face color is stored as either an explicit RGBA array (`"mode": "explicit"`), or, when the collection has a mapped scalar array, as that array plus a colormap name and a linear `Normalize` range (`"mode": "colormap"`). A collection that uses more than one path, an unrecognized marker, a non-allowlisted colormap name, or a normalization that is not exactly `matplotlib.colors.Normalize` falls back to a numeric recovery record instead.
+- **`AxesImage` (`Axes.imshow()`):** restored when its interpolation name and origin are allowlisted. The data array is stored as a `.npy` entry together with `extent`. For 2D data, a colormap name and linear `Normalize` range are stored (`"mode": "colormap"`); for RGB(A) data (a trailing dimension of 3 or 4), no colormap is needed (`"mode": "rgb"`). A non-allowlisted colormap name, a normalization that is not exactly `Normalize`, or data that is neither 2D nor RGB(A) falls back to a numeric recovery record instead.
+
+Both restore paths call the normal `Axes.scatter()` / `Axes.imshow()` Matplotlib APIs with the recovered, validated arguments — the same approach `Line2D` restore uses with its constructor — rather than manipulating a collection's or image's private attributes directly.
+
+Colormap names are checked against an explicit allowlist of Matplotlib's own built-in colormaps (`_COLORMAP_NAMES` in `matplotlib_extension/package.py`, captured from Matplotlib 3.11.2's colormap registry before any third-party registration), not against the live, mutable `matplotlib.colormaps` registry's current membership — a third-party package could register additional names into that registry at runtime, and this project never trusts dynamic registry contents as a discriminator. A name that passes this allowlist is then looked up once via `matplotlib.colormaps[name]` to construct the actual `Colormap` object. Interpolation names are checked against an explicit allowlist of Matplotlib's own built-in `AxesImage` interpolation names (`_INTERPOLATION_NAMES`).
 
 ## Container Bindings
 
@@ -157,5 +169,7 @@ Confirmation and process separation provide informed consent, not safety. Conver
 ## Compatibility
 
 Adding optional semantics requires a new figure schema version when an old reader could misinterpret them. Changing package layout, integrity rules, or canonical encoding requires a new package version. Readers must reject rather than partially interpret unknown versions.
+
+Figure schema version 2 ([Scatter and Image Restore](#scatter-and-image-restore)) is such a case, even though it only adds new optional `figure.json` fields (`collections` and `images` on each axes entry) and does not change the shape of any existing field. Schema version 1's documented contract is that every exact `PathCollection` and `AxesImage` instance is recorded as a numeric recovery record, and that a `PathCollection`/`AxesImage` not restorable as a real artist is always accompanied by an `UnsupportedFigureWarning` and a manifest warning. Under version 2, a writer that can exactly restore a scatter or image no longer emits that warning or writes a recovery record for it — the artist is written to the new `collections`/`images` fields instead. A version 1 reader ignores those new, unknown fields (its `_restore_axes`/`_axes_spec`-equivalent code never looks at them), so it would silently reconstruct a `Figure` missing the scatter/image, with no warning in the manifest to explain why and no recovery record for `recover_data()` to fall back on — exactly the "old reader could misinterpret" case this rule exists for: a consumer of the documented version 1 contract (for example, code that treats "no warning" as "nothing was skipped") would draw the wrong conclusion. Bumping to schema version 2 makes a version 1 reader fail closed with `PackageError` on these newer files instead, per [Restore Model](#restore-model)'s "readers reject unknown versions; they do not guess or fall back" rule, rather than degrading silently.
 
 Legacy files containing live Python object streams are outside this format. The library never restores them automatically, after a prompt, or as a compatibility fallback. A separately distributed deprecated migration tool may convert trusted legacy files to `.mpl.png`, but it remains outside the canonical reader and must follow the isolation and confirmation requirements in [Legacy Files](#legacy-files). The resulting file is accepted only after normal signature, package, and allowlist validation.

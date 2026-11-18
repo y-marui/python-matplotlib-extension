@@ -11,7 +11,7 @@ import json
 import math
 import warnings
 import zipfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from io import BytesIO
 from typing import Any, Final, cast
 
@@ -58,7 +58,7 @@ from matplotlib.ticker import (
 
 PACKAGE_FORMAT: Final = "org.matplotlib-extension.figure-package"
 PACKAGE_VERSION: Final = 1
-FIGURE_SCHEMA_VERSION: Final = 1
+FIGURE_SCHEMA_VERSION: Final = 2
 MAX_PACKAGE_BYTES: Final = 256 * 1024 * 1024
 MAX_JSON_BYTES: Final = 16 * 1024 * 1024
 MAX_ARRAY_BYTES: Final = 128 * 1024 * 1024
@@ -86,6 +86,220 @@ _SCALE_TYPES: Final = {
     "logit": LogitScale,
     "symlog": SymmetricalLogScale,
 }
+# Explicit allowlist of Matplotlib's own built-in colormap names (captured from
+# matplotlib 3.11.2's registry before any third-party registration). Never looked
+# up dynamically against the live, mutable registry contents for its membership.
+_COLORMAP_NAMES: Final = frozenset(
+    {
+        "Accent",
+        "Accent_r",
+        "Blues",
+        "Blues_r",
+        "BrBG",
+        "BrBG_r",
+        "BuGn",
+        "BuGn_r",
+        "BuPu",
+        "BuPu_r",
+        "CMRmap",
+        "CMRmap_r",
+        "Dark2",
+        "Dark2_r",
+        "GnBu",
+        "GnBu_r",
+        "Grays",
+        "Grays_r",
+        "Greens",
+        "Greens_r",
+        "Greys",
+        "Greys_r",
+        "OrRd",
+        "OrRd_r",
+        "Oranges",
+        "Oranges_r",
+        "PRGn",
+        "PRGn_r",
+        "Paired",
+        "Paired_r",
+        "Pastel1",
+        "Pastel1_r",
+        "Pastel2",
+        "Pastel2_r",
+        "PiYG",
+        "PiYG_r",
+        "PuBu",
+        "PuBuGn",
+        "PuBuGn_r",
+        "PuBu_r",
+        "PuOr",
+        "PuOr_r",
+        "PuRd",
+        "PuRd_r",
+        "Purples",
+        "Purples_r",
+        "RdBu",
+        "RdBu_r",
+        "RdGy",
+        "RdGy_r",
+        "RdPu",
+        "RdPu_r",
+        "RdYlBu",
+        "RdYlBu_r",
+        "RdYlGn",
+        "RdYlGn_r",
+        "Reds",
+        "Reds_r",
+        "Set1",
+        "Set1_r",
+        "Set2",
+        "Set2_r",
+        "Set3",
+        "Set3_r",
+        "Spectral",
+        "Spectral_r",
+        "Wistia",
+        "Wistia_r",
+        "YlGn",
+        "YlGnBu",
+        "YlGnBu_r",
+        "YlGn_r",
+        "YlOrBr",
+        "YlOrBr_r",
+        "YlOrRd",
+        "YlOrRd_r",
+        "afmhot",
+        "afmhot_r",
+        "autumn",
+        "autumn_r",
+        "berlin",
+        "berlin_r",
+        "binary",
+        "binary_r",
+        "bone",
+        "bone_r",
+        "brg",
+        "brg_r",
+        "bwr",
+        "bwr_r",
+        "cividis",
+        "cividis_r",
+        "cool",
+        "cool_r",
+        "coolwarm",
+        "coolwarm_r",
+        "copper",
+        "copper_r",
+        "cubehelix",
+        "cubehelix_r",
+        "flag",
+        "flag_r",
+        "gist_earth",
+        "gist_earth_r",
+        "gist_gray",
+        "gist_gray_r",
+        "gist_grey",
+        "gist_grey_r",
+        "gist_heat",
+        "gist_heat_r",
+        "gist_ncar",
+        "gist_ncar_r",
+        "gist_rainbow",
+        "gist_rainbow_r",
+        "gist_stern",
+        "gist_stern_r",
+        "gist_yarg",
+        "gist_yarg_r",
+        "gist_yerg",
+        "gist_yerg_r",
+        "gnuplot",
+        "gnuplot2",
+        "gnuplot2_r",
+        "gnuplot_r",
+        "gray",
+        "gray_r",
+        "grey",
+        "grey_r",
+        "hot",
+        "hot_r",
+        "hsv",
+        "hsv_r",
+        "inferno",
+        "inferno_r",
+        "jet",
+        "jet_r",
+        "magma",
+        "magma_r",
+        "managua",
+        "managua_r",
+        "nipy_spectral",
+        "nipy_spectral_r",
+        "ocean",
+        "ocean_r",
+        "okabe_ito",
+        "okabe_ito_r",
+        "pink",
+        "pink_r",
+        "plasma",
+        "plasma_r",
+        "prism",
+        "prism_r",
+        "rainbow",
+        "rainbow_r",
+        "seismic",
+        "seismic_r",
+        "spring",
+        "spring_r",
+        "summer",
+        "summer_r",
+        "tab10",
+        "tab10_r",
+        "tab20",
+        "tab20_r",
+        "tab20b",
+        "tab20b_r",
+        "tab20c",
+        "tab20c_r",
+        "terrain",
+        "terrain_r",
+        "turbo",
+        "turbo_r",
+        "twilight",
+        "twilight_r",
+        "twilight_shifted",
+        "twilight_shifted_r",
+        "vanimo",
+        "vanimo_r",
+        "viridis",
+        "viridis_r",
+        "winter",
+        "winter_r",
+    }
+)
+# Explicit allowlist of Matplotlib's own built-in AxesImage interpolation names.
+_INTERPOLATION_NAMES: Final = frozenset(
+    {
+        "antialiased",
+        "auto",
+        "bessel",
+        "bicubic",
+        "bilinear",
+        "blackman",
+        "catrom",
+        "gaussian",
+        "hamming",
+        "hanning",
+        "hermite",
+        "kaiser",
+        "lanczos",
+        "mitchell",
+        "nearest",
+        "none",
+        "quadric",
+        "sinc",
+        "spline16",
+        "spline36",
+    }
+)
 
 
 class PackageError(ValueError):
@@ -247,6 +461,142 @@ def _line_spec(line: Line2D, arrays: _ArrayStore) -> dict[str, Any]:
     }
 
 
+def _allowed_colormap_name(cmap: Any) -> str | None:
+    name = getattr(cmap, "name", None)
+    if isinstance(name, str) and name in _COLORMAP_NAMES:
+        return name
+    return None
+
+
+def _effective_norm_range(
+    norm: colors.Normalize, data: np.ndarray
+) -> tuple[float, float] | None:
+    vmin, vmax = norm.vmin, norm.vmax
+    if vmin is None or vmax is None:
+        probe = colors.Normalize(vmin=vmin, vmax=vmax)
+        probe.autoscale_None(data)
+        vmin, vmax = probe.vmin, probe.vmax
+    if vmin is None or vmax is None:
+        return None
+    return float(vmin), float(vmax)
+
+
+def _match_marker_symbol(path: Any) -> str | int | None:
+    for symbol in MarkerStyle.markers:
+        candidate = MarkerStyle(symbol)
+        candidate_path = candidate.get_path().transformed(candidate.get_transform())
+        candidate_vertices = np.asarray(candidate_path.vertices)
+        path_vertices = np.asarray(path.vertices)
+        if candidate_vertices.shape != path_vertices.shape:
+            continue
+        if not np.allclose(candidate_vertices, path_vertices, atol=1e-9):
+            continue
+        candidate_codes = candidate_path.codes
+        path_codes = path.codes
+        if (candidate_codes is None) != (path_codes is None):
+            continue
+        if candidate_codes is not None and not np.array_equal(
+            candidate_codes, path_codes
+        ):
+            continue
+        return symbol
+    return None
+
+
+def _scatter_spec(
+    collection: PathCollection, arrays: _ArrayStore
+) -> dict[str, Any] | None:
+    paths = collection.get_paths()
+    if len(paths) != 1:
+        return None
+    marker = _match_marker_symbol(paths[0])
+    if marker is None:
+        return None
+    # Resolve lazily-mapped face/edge colors (e.g. a colormapped "face" edgecolor)
+    # without requiring a prior canvas draw.
+    collection.update_scalarmappable()
+    values = collection.get_array()
+    color_spec: dict[str, Any]
+    if values is None:
+        color_spec = {
+            "facecolor": arrays.add(np.ma.getdata(collection.get_facecolor())),
+            "mode": "explicit",
+        }
+    else:
+        cmap_name = _allowed_colormap_name(collection.get_cmap())
+        norm = collection.norm
+        if cmap_name is None or type(norm) is not colors.Normalize:
+            return None
+        norm_range = _effective_norm_range(norm, np.ma.getdata(values))
+        if norm_range is None:
+            return None
+        color_spec = {
+            "cmap": cmap_name,
+            "mode": "colormap",
+            "values": arrays.add(np.ma.getdata(values)),
+            "vmax": norm_range[1],
+            "vmin": norm_range[0],
+        }
+    return {
+        "alpha": collection.get_alpha(),
+        "color": color_spec,
+        "edgecolor": arrays.add(np.ma.getdata(collection.get_edgecolor())),
+        "label": str(collection.get_label()),
+        "linewidths": arrays.add(np.ma.getdata(collection.get_linewidth())),
+        "marker": marker,
+        "offsets": arrays.add(np.ma.getdata(collection.get_offsets())),
+        "sizes": arrays.add(np.ma.getdata(collection.get_sizes())),
+        "visible": bool(collection.get_visible()),
+        "zorder": float(collection.get_zorder()),
+    }
+
+
+def _image_spec(image: AxesImage, arrays: _ArrayStore) -> dict[str, Any] | None:
+    interpolation = image.get_interpolation()
+    if interpolation not in _INTERPOLATION_NAMES:
+        return None
+    origin = getattr(image, "origin", None)
+    if origin not in {"upper", "lower"}:
+        return None
+    data = image.get_array()
+    if data is None:
+        return None
+    raw = np.ma.getdata(data)
+    color_spec: dict[str, Any]
+    if raw.ndim == 2:
+        cmap_name = _allowed_colormap_name(image.get_cmap())
+        norm = image.norm
+        if cmap_name is None or type(norm) is not colors.Normalize:
+            return None
+        norm_range = _effective_norm_range(norm, raw)
+        if norm_range is None:
+            return None
+        color_spec = {
+            "cmap": cmap_name,
+            "mode": "colormap",
+            "vmax": norm_range[1],
+            "vmin": norm_range[0],
+        }
+    elif raw.ndim == 3 and raw.shape[-1] in (3, 4):
+        color_spec = {"mode": "rgb"}
+    else:
+        return None
+    return {
+        "alpha": image.get_alpha(),
+        "color": color_spec,
+        "data": arrays.add(raw),
+        "extent": [
+            _finite_number(value, "extent")
+            for value in cast(Sequence[object], image.get_extent())
+        ],
+        "interpolation": interpolation,
+        "label": str(image.get_label()),
+        "origin": origin,
+        "visible": bool(image.get_visible()),
+        "zorder": float(image.get_zorder()),
+    }
+
+
 def _locator_spec(
     locator: Any, arrays: _ArrayStore, collected: list[str]
 ) -> dict[str, Any] | None:
@@ -403,58 +753,76 @@ def _axes_spec(
         texts.append(_text_spec(text, transform=transform_name))
 
     recovery: list[dict[str, Any]] = []
+    collections: list[dict[str, Any]] = []
     for collection in ax.collections:
-        if type(collection) is PathCollection:
-            try:
-                values = collection.get_array()
-                recovery.append(
-                    {
-                        "artist_type": "PathCollection",
-                        "label": str(collection.get_label()),
-                        "offsets": arrays.add(np.ma.getdata(collection.get_offsets())),
-                        "sizes": arrays.add(collection.get_sizes()),
-                        "values": None
-                        if values is None
-                        else arrays.add(np.ma.getdata(values)),
-                    }
-                )
-                _warn(
-                    "Stored raw numeric data for unsupported PathCollection; "
-                    "artist skipped",
-                    collected,
-                )
-            except (PackageError, TypeError, ValueError) as exc:
-                _warn(f"Skipped PathCollection recovery data: {exc}", collected)
-        else:
+        if type(collection) is not PathCollection:
             _warn(
                 f"Skipped unsupported collection class {type(collection).__name__}",
                 collected,
             )
+            continue
+        try:
+            scatter_spec = _scatter_spec(collection, arrays)
+        except (PackageError, TypeError, ValueError) as exc:
+            _warn(f"Skipped PathCollection: {exc}", collected)
+            continue
+        if scatter_spec is not None:
+            collections.append(scatter_spec)
+            continue
+        try:
+            values = collection.get_array()
+            recovery.append(
+                {
+                    "artist_type": "PathCollection",
+                    "label": str(collection.get_label()),
+                    "offsets": arrays.add(np.ma.getdata(collection.get_offsets())),
+                    "sizes": arrays.add(collection.get_sizes()),
+                    "values": None
+                    if values is None
+                    else arrays.add(np.ma.getdata(values)),
+                }
+            )
+            _warn(
+                "Stored raw numeric data for unsupported PathCollection; "
+                "artist skipped",
+                collected,
+            )
+        except (PackageError, TypeError, ValueError) as exc:
+            _warn(f"Skipped PathCollection recovery data: {exc}", collected)
+    images: list[dict[str, Any]] = []
     for image in ax.images:
-        if type(image) is AxesImage:
-            try:
-                image_data = image.get_array()
-                if image_data is None:
-                    raise PackageError("AxesImage has no numeric data")
-                recovery.append(
-                    {
-                        "artist_type": "AxesImage",
-                        "data": arrays.add(np.ma.getdata(image_data)),
-                        "extent": [
-                            _finite_number(value, "extent")
-                            for value in cast(Sequence[object], image.get_extent())
-                        ],
-                        "label": str(image.get_label()),
-                    }
-                )
-                _warn(
-                    "Stored raw numeric data for unsupported AxesImage; artist skipped",
-                    collected,
-                )
-            except (PackageError, TypeError, ValueError) as exc:
-                _warn(f"Skipped AxesImage recovery data: {exc}", collected)
-        else:
+        if type(image) is not AxesImage:
             _warn(f"Skipped unsupported image class {type(image).__name__}", collected)
+            continue
+        try:
+            image_spec = _image_spec(image, arrays)
+        except (PackageError, TypeError, ValueError) as exc:
+            _warn(f"Skipped AxesImage: {exc}", collected)
+            continue
+        if image_spec is not None:
+            images.append(image_spec)
+            continue
+        try:
+            image_data = image.get_array()
+            if image_data is None:
+                raise PackageError("AxesImage has no numeric data")
+            recovery.append(
+                {
+                    "artist_type": "AxesImage",
+                    "data": arrays.add(np.ma.getdata(image_data)),
+                    "extent": [
+                        _finite_number(value, "extent")
+                        for value in cast(Sequence[object], image.get_extent())
+                    ],
+                    "label": str(image.get_label()),
+                }
+            )
+            _warn(
+                "Stored raw numeric data for unsupported AxesImage; artist skipped",
+                collected,
+            )
+        except (PackageError, TypeError, ValueError) as exc:
+            _warn(f"Skipped AxesImage recovery data: {exc}", collected)
     unsupported_groups: dict[str, Sequence[Any]] = {
         "artist": cast(Sequence[Any], ax.artists),
         "patch": cast(Sequence[Any], ax.patches),
@@ -493,7 +861,9 @@ def _axes_spec(
     return {
         "aspect": aspect,
         "axis_on": bool(ax.axison),
+        "collections": collections,
         "facecolor": _color(ax.get_facecolor()),
+        "images": images,
         "legend": legend_spec,
         "lines": lines,
         "position": [float(value) for value in ax.get_position(original=True).bounds],
@@ -794,7 +1164,7 @@ def _optional_number(spec: Mapping[str, Any], key: str) -> float | None:
     return _number(spec, key)
 
 
-def _enum(spec: Mapping[str, Any], key: str, allowed: set[str]) -> Any:
+def _enum(spec: Mapping[str, Any], key: str, allowed: Collection[str]) -> Any:
     value = _string(spec, key, max_length=100)
     if value not in allowed:
         raise PackageError(f"Unsupported {key}: {value}")
@@ -996,6 +1366,85 @@ def _restore_line(
     return line
 
 
+def _restore_colormap(spec: Mapping[str, Any], key: str) -> Any:
+    name = _enum(spec, key, _COLORMAP_NAMES)
+    try:
+        return matplotlib.colormaps[name]
+    except KeyError as exc:
+        raise PackageError(f"Unsupported {key}: {name}") from exc
+
+
+def _restore_scatter(
+    ax: matplotlib.axes.Axes, spec: object, files: Mapping[str, bytes]
+) -> None:
+    item = _mapping(spec, "collection")
+    marker = item.get("marker")
+    if (
+        not isinstance(marker, str | int)
+        or isinstance(marker, bool)
+        or marker not in MarkerStyle.markers
+    ):
+        raise PackageError("Invalid scatter marker")
+    offsets = _load_array(files, item.get("offsets"))
+    if offsets.ndim != 2 or offsets.shape[1] != 2:
+        raise PackageError("Invalid scatter offsets")
+    color_item = _mapping(item.get("color"), "color")
+    mode = _enum(color_item, "mode", {"explicit", "colormap"})
+    color_kwargs: dict[str, Any] = {}
+    if mode == "explicit":
+        color_kwargs["c"] = _load_array(files, color_item.get("facecolor"))
+    else:
+        vmin = _number(color_item, "vmin")
+        vmax = _number(color_item, "vmax")
+        color_kwargs["c"] = _load_array(files, color_item.get("values"))
+        color_kwargs["cmap"] = _restore_colormap(color_item, "cmap")
+        color_kwargs["norm"] = colors.Normalize(vmin=vmin, vmax=vmax)
+    collection = ax.scatter(
+        offsets[:, 0],
+        offsets[:, 1],
+        s=_load_array(files, item.get("sizes")),
+        marker=marker,  # type: ignore[arg-type]
+        linewidths=cast(Any, _load_array(files, item.get("linewidths"))),
+        edgecolors=cast(Any, _load_array(files, item.get("edgecolor"))),
+        alpha=_optional_number(item, "alpha"),
+        label=_string(item, "label", max_length=MAX_TEXT_LENGTH),
+        **color_kwargs,
+    )
+    collection.set_visible(_boolean(item, "visible"))
+    collection.set_zorder(
+        _number(item, "zorder", minimum=-1_000_000, maximum=1_000_000)
+    )
+
+
+def _restore_image(
+    ax: matplotlib.axes.Axes, spec: object, files: Mapping[str, bytes]
+) -> None:
+    item = _mapping(spec, "image")
+    data = _load_array(files, item.get("data"))
+    extent = _number_list(item.get("extent"), "extent", 4)
+    origin = _enum(item, "origin", {"upper", "lower"})
+    interpolation = _enum(item, "interpolation", _INTERPOLATION_NAMES)
+    color_item = _mapping(item.get("color"), "color")
+    mode = _enum(color_item, "mode", {"colormap", "rgb"})
+    color_kwargs: dict[str, Any] = {}
+    if mode == "colormap":
+        color_kwargs["cmap"] = _restore_colormap(color_item, "cmap")
+        color_kwargs["norm"] = colors.Normalize(
+            vmin=_number(color_item, "vmin"), vmax=_number(color_item, "vmax")
+        )
+    image = ax.imshow(
+        data,
+        extent=(extent[0], extent[1], extent[2], extent[3]),
+        origin=origin,
+        interpolation=interpolation,
+        alpha=_optional_number(item, "alpha"),
+        label=_string(item, "label", max_length=MAX_TEXT_LENGTH),
+        **color_kwargs,
+    )
+    image.set_visible(_boolean(item, "visible"))
+    image.set_zorder(_number(item, "zorder", minimum=-1_000_000, maximum=1_000_000))
+
+
 def _restore_scale(name: str, axis: matplotlib.axis.Axis) -> ScaleBase:
     scale_type = _SCALE_TYPES.get(name)
     if scale_type is None:
@@ -1027,6 +1476,14 @@ def _restore_axes(figure: Figure, spec: object, files: Mapping[str, bytes]) -> N
     lines = _sequence(item.get("lines"), "lines", max_items=MAX_ARTISTS_PER_AXES)
     for line_spec in lines:
         _restore_line(ax, line_spec, files)
+    collections = _sequence(
+        item.get("collections", []), "collections", max_items=MAX_ARTISTS_PER_AXES
+    )
+    for collection_spec in collections:
+        _restore_scatter(ax, collection_spec, files)
+    images = _sequence(item.get("images", []), "images", max_items=MAX_ARTISTS_PER_AXES)
+    for image_spec in images:
+        _restore_image(ax, image_spec, files)
     texts = _sequence(item.get("texts"), "texts", max_items=MAX_ARTISTS_PER_AXES)
     for text_value in texts:
         text_spec = _mapping(text_value, "text")
