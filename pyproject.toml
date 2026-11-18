@@ -17,9 +17,11 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.100.0",
     "ipykernel>=6.29.2",
     "mypy>=1.0",
     "pytest>=8.0.0",
+    "pytest-timeout>=2.3.0",
     "ruff>=0.4.0",
     "types-olefile>=0.47.0.20260508",
 ]
@@ -44,6 +46,10 @@ warn_unused_configs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Global hang backstop for every test, fuzz targets included: a parser bug that
+# spins forever must fail CI loudly instead of making the job time out opaquely.
+timeout = 120
+markers = ["fuzz: property-based parser-hardening tests (see tests/fuzz_support.py)"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["matplotlib_extension"]

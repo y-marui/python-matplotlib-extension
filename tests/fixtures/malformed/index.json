@@ -1,0 +1,82 @@
+[
+  {
+    "error": "Invalid figure package ZIP",
+    "file": "truncated_zip.bin",
+    "loader": "load_package"
+  },
+  {
+    "error": "Unsafe package path",
+    "file": "path_traversal_dotdot.bin",
+    "loader": "load_package"
+  },
+  {
+    "error": "Unsafe package path",
+    "file": "path_traversal_absolute.bin",
+    "loader": "load_package"
+  },
+  {
+    "error": "Unsafe package path",
+    "file": "path_backslash.bin",
+    "loader": "load_package"
+  },
+  {
+    "error": "Duplicate package entries are forbidden",
+    "file": "duplicate_entries.bin",
+    "loader": "load_package"
+  },
+  {
+    "error": "Package contains unlisted files",
+    "file": "unlisted_extra_file.bin",
+    "loader": "load_package"
+  },
+  {
+    "error": "Unsupported figure schema version",
+    "file": "schema_version_cross_mismatch.bin",
+    "loader": "load_package"
+  },
+  {
+    "error": "Package entry exceeds the size limit",
+    "file": "oversized_array_declared_size.bin",
+    "loader": "load_package"
+  },
+  {
+    "error": "Editable PNG chunk failed its CRC check",
+    "file": "png_bad_crc.bin",
+    "loader": "extract_png"
+  },
+  {
+    "error": "exactly one editable payload",
+    "file": "png_duplicate_chunks.bin",
+    "loader": "extract_png"
+  },
+  {
+    "error": "Invalid PDF file",
+    "file": "pdf_no_attachment.bin",
+    "loader": "extract_pdf"
+  },
+  {
+    "error": "Invalid base64 SVG payload",
+    "file": "svg_bad_base64.bin",
+    "loader": "extract_svg"
+  },
+  {
+    "error": "exactly one editable payload",
+    "file": "svg_duplicate_payload.bin",
+    "loader": "extract_svg"
+  },
+  {
+    "error": "OLE container has unexpected streams or storages",
+    "file": "ole_wrong_stream_name.bin",
+    "loader": "extract_ole_native_png"
+  },
+  {
+    "error": "Invalid OLE compound file",
+    "file": "ole_truncated_native.bin",
+    "loader": "extract_ole_native_png"
+  },
+  {
+    "error": "OLE native stream size is invalid",
+    "file": "ole_size_mismatch.bin",
+    "loader": "extract_ole_native_png"
+  }
+]
