@@ -701,6 +701,25 @@ def _patch_shape_fields(patch: Patch, arrays: _ArrayStore) -> dict[str, Any] | N
     return None
 
 
+def _patch_color_field(resolved: Any, alpha: float | None) -> str:
+    # Patch._set_facecolor()/_set_edgecolor() resolve a literal "none" color
+    # to alpha 0 regardless of the artist-level alpha (colors.to_rgba
+    # special-cases the string "none"), while any other color's alpha
+    # channel is overridden to equal that artist alpha when one is set. A
+    # resolved alpha of 0 alongside a nonzero artist alpha can therefore
+    # only come from that "none"/unfilled special case (an ordinary color
+    # would have had its alpha overridden to the nonzero value instead), so
+    # store the literal "none" marker there instead of a hex color: feeding
+    # a hex color with a baked-in zero alpha back through
+    # colors.to_rgba(color, alpha) on restore would get its alpha
+    # overridden back to the nonzero artist alpha, turning an invisible
+    # fill/edge into a visible one.
+    rgba = colors.to_rgba(resolved)
+    if alpha not in (None, 0.0) and rgba[3] == 0.0:
+        return "none"
+    return _color(resolved)
+
+
 def _patch_spec(
     patch: Patch, arrays: _ArrayStore, ax: matplotlib.axes.Axes
 ) -> dict[str, Any] | None:
@@ -721,15 +740,24 @@ def _patch_spec(
         return None
     if type(patch) is Rectangle and patch.rotation_point not in _PATCH_ROTATION_POINTS:
         return None
+    linestyle = patch.get_linestyle()
+    if not isinstance(linestyle, str):
+        return None
+    hatch = patch.get_hatch()
+    if hatch is not None and not isinstance(hatch, str):
+        return None
     fields = _patch_shape_fields(patch, arrays)
     if fields is None:
         return None
     fields.update(
         {
             "alpha": None if alpha is None else float(alpha),
-            "edgecolor": _color(patch.get_edgecolor()),
-            "facecolor": _color(patch.get_facecolor()),
+            "edgecolor": _patch_color_field(patch.get_edgecolor(), alpha),
+            "facecolor": _patch_color_field(patch.get_facecolor(), alpha),
+            "fill": bool(patch.get_fill()),
+            "hatch": hatch,
             "label": str(patch.get_label()),
+            "linestyle": linestyle,
             "linewidth": float(patch.get_linewidth()),
             "visible": bool(patch.get_visible()),
             "zorder": float(patch.get_zorder()),
@@ -776,10 +804,24 @@ def _errorbar_bar_info(
 ) -> _ErrorbarBarInfo | None:
     if type(bar) is not LineCollection:
         return None
-    if not bar.get_transform().contains_branch(ax.transData):
+    # contains_branch() only checks whether transData is reachable within
+    # the transform's composition tree, so an extra affine step chained
+    # onto transData (e.g. Affine2D().translate(1, 0) + ax.transData) would
+    # still pass; require the exact transform instead, like every other
+    # exactly-restored artist's data-coordinate guard.
+    if bar.get_transform() is not ax.transData:
         return None
     alpha = bar.get_alpha()
     if not _is_scalar_alpha(alpha):
+        return None
+    # The bar's dash pattern is neither saved nor restored (ax.errorbar()
+    # always draws solid bars for this exact-restore path), so a bar that
+    # was given a non-solid linestyle must fall back instead of silently
+    # losing it. Collection.get_linestyle() always normalizes to a list of
+    # (offset, dashes) tuples (its broader declared type also allows a bare
+    # style string, which LineCollection never actually returns here).
+    linestyles = cast(Sequence[tuple[float, Any]], bar.get_linestyle())
+    if any(dashes is not None for _, dashes in linestyles):
         return None
     segments = bar.get_segments()
     if len(segments) != n:
@@ -810,7 +852,16 @@ def _errorbar_bar_info(
 
 
 class _ErrorbarCapInfo:
-    __slots__ = ("alpha", "color", "markeredgewidth", "markersize", "visible", "zorder")
+    __slots__ = (
+        "alpha",
+        "color",
+        "markeredgewidth",
+        "markersize",
+        "visible",
+        "xdata",
+        "ydata",
+        "zorder",
+    )
 
     def __init__(
         self,
@@ -820,6 +871,8 @@ class _ErrorbarCapInfo:
         alpha: float | None,
         zorder: float,
         visible: bool,
+        xdata: np.ndarray,
+        ydata: np.ndarray,
     ) -> None:
         self.color = color
         self.markersize = markersize
@@ -827,10 +880,16 @@ class _ErrorbarCapInfo:
         self.alpha = alpha
         self.zorder = zorder
         self.visible = visible
+        self.xdata = xdata
+        self.ydata = ydata
 
 
-def _errorbar_cap_info(cap: Any, expected_marker: str) -> _ErrorbarCapInfo | None:
+def _errorbar_cap_info(
+    cap: Any, expected_marker: str, ax: matplotlib.axes.Axes, n: int
+) -> _ErrorbarCapInfo | None:
     if type(cap) is not Line2D:
+        return None
+    if cap.get_transform() is not ax.transData:
         return None
     if cap.get_marker() != expected_marker:
         return None
@@ -839,14 +898,45 @@ def _errorbar_cap_info(cap: Any, expected_marker: str) -> _ErrorbarCapInfo | Non
     alpha = cap.get_alpha()
     if not _is_scalar_alpha(alpha):
         return None
+    xdata = np.asarray(cap.get_xdata(orig=False), dtype=float)
+    ydata = np.asarray(cap.get_ydata(orig=False), dtype=float)
+    if xdata.shape != (n,) or ydata.shape != (n,) or _has_masked_values(xdata, ydata):
+        return None
     return _ErrorbarCapInfo(
-        color=colors.to_rgba(cap.get_color()),
+        # Caps are markers: their visible color is the marker edge color,
+        # not Line2D.get_color() (the marker face is unfilled for "|"/"_").
+        color=colors.to_rgba(cap.get_markeredgecolor()),
         markersize=float(cap.get_markersize()),
         markeredgewidth=float(cap.get_markeredgewidth()),
         alpha=None if alpha is None else float(alpha),
         zorder=float(cap.get_zorder()),
         visible=bool(cap.get_visible()),
+        xdata=xdata,
+        ydata=ydata,
     )
+
+
+def _errorbar_bar_offsets(
+    segments: np.ndarray, dep: np.ndarray, indep: np.ndarray, *, is_x: bool
+) -> np.ndarray | None:
+    # A bar's two segment endpoints must share the independent coordinate
+    # (axis-aligned) and bracket the data point on the dependent axis with
+    # non-negative extents on both sides. Anything else means the bar (or
+    # the data line) was hand-edited independently -- e.g. moved
+    # perpendicular to the bars, or given a negative derived error -- which
+    # ax.errorbar() cannot reconstruct (it rejects negative error values
+    # outright), so reject it here instead of failing later on restore.
+    indep_index = 1 if is_x else 0
+    dep_index = 0 if is_x else 1
+    if not np.allclose(segments[:, 0, indep_index], indep) or not np.allclose(
+        segments[:, 1, indep_index], indep
+    ):
+        return None
+    low = dep - segments[:, 0, dep_index]
+    high = segments[:, 1, dep_index] - dep
+    if np.any(low < 0) or np.any(high < 0):
+        return None
+    return np.stack([low, high])
 
 
 def _errorbar_spec(
@@ -856,6 +946,8 @@ def _errorbar_spec(
         return None
     dataline, caps, bars = container.lines
     if dataline is None or type(dataline) is not Line2D:
+        return None
+    if dataline.get_transform() is not ax.transData:
         return None
     has_xerr = bool(getattr(container, "has_xerr", False))
     has_yerr = bool(getattr(container, "has_yerr", False))
@@ -880,6 +972,7 @@ def _errorbar_spec(
     for info in bar_infos[1:]:
         if (
             not np.allclose(info.color, first_bar.color)
+            or info.linewidth != first_bar.linewidth
             or info.alpha != first_bar.alpha
             or info.zorder != first_bar.zorder
             or info.visible != first_bar.visible
@@ -889,16 +982,22 @@ def _errorbar_spec(
     bar_index = 0
     xerr_ref: str | None = None
     yerr_ref: str | None = None
+    xerr_segments: np.ndarray | None = None
+    yerr_segments: np.ndarray | None = None
     if has_xerr:
-        segments = bar_infos[bar_index].segments
+        xerr_segments = bar_infos[bar_index].segments
         bar_index += 1
-        offsets = np.stack([x - segments[:, 0, 0], segments[:, 1, 0] - x])
-        xerr_ref = arrays.add(offsets)
+        xerr_offsets = _errorbar_bar_offsets(xerr_segments, x, y, is_x=True)
+        if xerr_offsets is None:
+            return None
+        xerr_ref = arrays.add(xerr_offsets)
     if has_yerr:
-        segments = bar_infos[bar_index].segments
+        yerr_segments = bar_infos[bar_index].segments
         bar_index += 1
-        offsets = np.stack([y - segments[:, 0, 1], segments[:, 1, 1] - y])
-        yerr_ref = arrays.add(offsets)
+        yerr_offsets = _errorbar_bar_offsets(yerr_segments, y, x, is_x=False)
+        if yerr_offsets is None:
+            return None
+        yerr_ref = arrays.add(yerr_offsets)
 
     expected_caps = 0
     if has_xerr:
@@ -909,21 +1008,36 @@ def _errorbar_spec(
     capthick = 0.0
     if len(caps) == expected_caps and expected_caps > 0:
         cap_infos: list[_ErrorbarCapInfo] = []
+        cap_segment_pairs: list[np.ndarray] = []
         cap_index = 0
         if has_xerr:
+            assert xerr_segments is not None
             for cap in caps[cap_index : cap_index + 2]:
-                cap_info = _errorbar_cap_info(cap, "|")
+                cap_info = _errorbar_cap_info(cap, "|", ax, n)
                 if cap_info is None:
                     return None
                 cap_infos.append(cap_info)
+            cap_segment_pairs.append(xerr_segments)
             cap_index += 2
         if has_yerr:
+            assert yerr_segments is not None
             for cap in caps[cap_index : cap_index + 2]:
-                cap_info = _errorbar_cap_info(cap, "_")
+                cap_info = _errorbar_cap_info(cap, "_", ax, n)
                 if cap_info is None:
                     return None
                 cap_infos.append(cap_info)
+            cap_segment_pairs.append(yerr_segments)
             cap_index += 2
+        # Each pair of caps must sit exactly at its bar's two endpoints --
+        # ax.errorbar() positions caps there itself, so any mismatch means a
+        # cap (or the bar) was hand-edited independently of the other.
+        for pair_index, segments in enumerate(cap_segment_pairs):
+            low_cap = cap_infos[pair_index * 2]
+            high_cap = cap_infos[pair_index * 2 + 1]
+            if not np.allclose(
+                [low_cap.xdata, low_cap.ydata], segments[:, 0, :].T
+            ) or not np.allclose([high_cap.xdata, high_cap.ydata], segments[:, 1, :].T):
+                return None
         first_cap = cap_infos[0]
         if (
             first_cap.alpha != first_bar.alpha
@@ -1686,6 +1800,14 @@ def _optional_number(spec: Mapping[str, Any], key: str) -> float | None:
     return _number(spec, key)
 
 
+def _optional_string(
+    spec: Mapping[str, Any], key: str, *, max_length: int
+) -> str | None:
+    if spec.get(key) is None:
+        return None
+    return _string(spec, key, max_length=max_length)
+
+
 def _enum(spec: Mapping[str, Any], key: str, allowed: Collection[str]) -> Any:
     value = _string(spec, key, max_length=100)
     if value not in allowed:
@@ -1976,7 +2098,10 @@ def _restore_patch(
         "alpha": _optional_number(item, "alpha"),
         "edgecolor": _safe_color(item, "edgecolor"),
         "facecolor": _safe_color(item, "facecolor"),
+        "fill": _boolean(item, "fill"),
+        "hatch": _optional_string(item, "hatch", max_length=100),
         "label": _string(item, "label", max_length=MAX_TEXT_LENGTH),
+        "linestyle": _string(item, "linestyle", max_length=100),
         "linewidth": _number(item, "linewidth", minimum=0, maximum=1_000_000),
     }
     patch: Patch
@@ -2038,9 +2163,6 @@ def _restore_errorbar(
         if err is not None and err.shape != (2, n):
             raise PackageError("Invalid errorbar xerr/yerr shape")
     capcolor = item.get("capcolor")
-    color_kwargs: dict[str, Any] = {}
-    if capcolor is not None:
-        color_kwargs["color"] = _safe_color(item, "capcolor")
     container = ax.errorbar(
         x,
         y,
@@ -2055,10 +2177,30 @@ def _restore_errorbar(
         zorder=_number(item, "zorder", minimum=-1_000_000, maximum=1_000_000),
         visible=_boolean(item, "visible"),
         label=_string(item, "label", max_length=MAX_TEXT_LENGTH),
-        **color_kwargs,
     )
-    container.lines = (line, container.lines[1], container.lines[2])
-    return container
+    _, caps, bars = container.lines
+    if capcolor is not None:
+        # Matplotlib sets a cap's visible marker-edge color from its own
+        # `eb_cap_style` (derived from `ecolor`) at creation time, not from
+        # a `color=` kwarg passed to errorbar(); apply the saved resolved
+        # color directly so it survives regardless of that internal default.
+        capcolor_value = _safe_color(item, "capcolor")
+        for cap in caps:
+            cap.set_markeredgecolor(capcolor_value)
+    # Assigning to `.lines` does not update the (immutable-by-convention)
+    # tuple Container.__getitem__ exposes -- container[0] would stay None --
+    # and Matplotlib's legend handler unpacks that tuple directly. Build a
+    # fresh container around the restored data line instead, and register it
+    # in the Axes' containers list in place of the one errorbar() added.
+    new_container = ErrorbarContainer(
+        (line, caps, bars),
+        has_xerr=container.has_xerr,
+        has_yerr=container.has_yerr,
+        label=container.get_label(),
+    )
+    new_container._remove_method = ax.containers.remove  # type: ignore[attr-defined]
+    ax.containers[ax.containers.index(container)] = new_container
+    return new_container
 
 
 def _restore_scale(name: str, axis: matplotlib.axis.Axis) -> ScaleBase:

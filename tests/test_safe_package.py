@@ -20,6 +20,7 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Circle, Ellipse, Polygon, Rectangle, Wedge
 from matplotlib.projections import register_projection
 from matplotlib.scale import LinearScale, register_scale
+from matplotlib.transforms import Affine2D
 from PIL import Image
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import NameObject
@@ -797,6 +798,94 @@ def test_patch_with_array_alpha_remains_recoverable() -> None:
     plt.close(fig)
 
 
+def test_patch_with_transparent_facecolor_round_trips_exactly() -> None:
+    # facecolor="none" resolves to RGBA alpha 0 regardless of the artist
+    # alpha (Matplotlib special-cases the literal "none" color); naively
+    # round-tripping the resolved RGBA through a hex color plus a separate
+    # alpha kwarg would get that alpha overridden back to 0.5 on restore,
+    # turning an invisible fill into a half-opaque black one.
+    fig, ax = plt.subplots()
+    ax.add_patch(
+        Rectangle(
+            (0.0, 0.0),
+            1.0,
+            1.0,
+            facecolor="none",
+            edgecolor="none",
+            alpha=0.5,
+            label="transparent",
+        )
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnsupportedFigureWarning)
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    patch = restored.axes[0].patches[0]
+    np.testing.assert_allclose(patch.get_facecolor(), [0.0, 0.0, 0.0, 0.0])
+    np.testing.assert_allclose(patch.get_edgecolor(), [0.0, 0.0, 0.0, 0.0])
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_patch_with_fill_false_round_trips_exactly() -> None:
+    fig, ax = plt.subplots()
+    ax.add_patch(
+        Rectangle((0.0, 0.0), 1.0, 1.0, fill=False, facecolor="red", label="unfilled")
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnsupportedFigureWarning)
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    patch = restored.axes[0].patches[0]
+    assert patch.get_fill() is False
+    np.testing.assert_allclose(patch.get_facecolor()[3], 0.0)
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_patch_with_linestyle_and_hatch_round_trips_exactly() -> None:
+    fig, ax = plt.subplots()
+    ax.add_patch(
+        Rectangle((0.0, 0.0), 1.0, 1.0, linestyle="--", hatch="//", label="hatched")
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnsupportedFigureWarning)
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    patch = restored.axes[0].patches[0]
+    assert patch.get_linestyle() == "--"
+    assert patch.get_hatch() == "//"
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_patch_with_custom_dash_linestyle_remains_recoverable() -> None:
+    # A custom on/off dash sequence makes get_linestyle() return a tuple
+    # rather than one of Matplotlib's named/short-code strings, which this
+    # project's restore path cannot feed back into the Patch constructor.
+    fig, ax = plt.subplots()
+    patch = Rectangle((0.0, 0.0), 1.0, 1.0, label="custom-dash")
+    patch.set_linestyle((0, (3.0, 1.0)))
+    ax.add_patch(patch)
+
+    with pytest.warns(UnsupportedFigureWarning, match="Stored raw numeric data"):
+        payload = dump_package(fig)
+
+    records = recover_numeric_data(payload)
+    assert len(records) == 1
+    assert records[0]["artist_type"] == "Rectangle"
+    restored = load_package(payload)
+    assert len(restored.axes[0].patches) == 0
+    plt.close(fig)
+    plt.close(restored)
+
+
 def test_patch_with_unsupported_subclass_is_skipped() -> None:
     fig, ax = plt.subplots()
     ax.add_patch(Ellipse((0.0, 0.0), 1.0, 2.0, label="ellipse"))
@@ -878,6 +967,10 @@ def test_errorbar_round_trips_exactly() -> None:
     assert type(container) is ErrorbarContainer
     assert container.get_label() == "errbar"
     dataline, caps, bars = container.lines
+    # A fresh ErrorbarContainer must be built around the restored data line
+    # (not left as a stale `.lines` assignment), since Matplotlib's legend
+    # handler reads container[0] directly, not container.lines[0].
+    assert container[0] is dataline
     assert type(dataline) is Line2D
     np.testing.assert_allclose(dataline.get_xdata(orig=False), [1.0, 2.0, 3.0])
     np.testing.assert_allclose(dataline.get_ydata(orig=False), [4.0, 5.0, 6.0])
@@ -887,6 +980,12 @@ def test_errorbar_round_trips_exactly() -> None:
     assert len(bars) == 2
     for bar in bars:
         np.testing.assert_allclose(bar.get_alpha(), 0.8)
+    for cap in caps:
+        # Caps are markers: their visible color is the marker edge color,
+        # which Matplotlib derives from ecolor, not the dataline's "purple".
+        np.testing.assert_allclose(
+            to_rgba(cap.get_markeredgecolor()), to_rgba("orange")
+        )
     np.testing.assert_allclose(bars[1].get_segments()[0], [[1.0, 3.9], [1.0, 4.3]])
     np.testing.assert_allclose(bars[0].get_segments()[0], [[0.95, 4.0], [1.05, 4.0]])
     # The data line plus the 4 cap Line2Ds (ax.lines), with the 2 bar
@@ -932,6 +1031,147 @@ def test_errorbar_yerr_only_round_trips_exactly() -> None:
     assert len(caps) == 2
     assert all(cap.get_marker() == "_" for cap in caps)
     assert len(bars) == 1
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_errorbar_with_custom_cap_edge_color_round_trips_exactly() -> None:
+    # Caps' visible color is the marker edge color, which Matplotlib
+    # resolves from ecolor at creation time (not from a later `color=`
+    # kwarg at restore); only reading/applying get_markeredgecolor() /
+    # set_markeredgecolor() directly can preserve a cap color that was
+    # customized independently of ecolor.
+    fig, ax = plt.subplots()
+    container = ax.errorbar(
+        [1.0, 2.0], [3.0, 4.0], yerr=0.5, fmt="o", ecolor="orange", capsize=4
+    )
+    _, caps, _ = container.lines
+    for cap in caps:
+        cap.set_markeredgecolor("red")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnsupportedFigureWarning)
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    _, restored_caps, _ = restored.axes[0].containers[0].lines
+    for cap in restored_caps:
+        np.testing.assert_allclose(to_rgba(cap.get_markeredgecolor()), to_rgba("red"))
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_errorbar_with_negative_offset_remains_recoverable() -> None:
+    # Hand-editing a bar's segment to put the low endpoint past the data
+    # point produces a negative derived error, which ax.errorbar() rejects
+    # outright on restore; this must be caught at save time instead of
+    # crashing the load.
+    fig, ax = plt.subplots()
+    container = ax.errorbar([1.0, 2.0], [3.0, 4.0], yerr=0.5, fmt="o", capsize=0)
+    _, _, bars = container.lines
+    bars[0].set_segments([[[1.0, 3.6], [1.0, 3.5]], [[2.0, 4.5], [2.0, 4.5]]])
+
+    with pytest.warns(
+        UnsupportedFigureWarning, match="does not match the exact restorable shape"
+    ):
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    assert len(restored.axes[0].containers) == 0
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_errorbar_with_sideways_bar_remains_recoverable() -> None:
+    # Moving a bar perpendicular to its axis (here: a yerr bar whose
+    # endpoints no longer share the data point's x-coordinate) would
+    # silently relocate it on restore if the independent coordinate were
+    # never checked against the data line.
+    fig, ax = plt.subplots()
+    container = ax.errorbar([1.0, 2.0], [3.0, 4.0], yerr=0.5, fmt="o", capsize=0)
+    _, _, bars = container.lines
+    bars[0].set_segments([[[1.5, 3.5], [1.0, 4.5]], [[2.0, 3.5], [2.0, 4.5]]])
+
+    with pytest.warns(
+        UnsupportedFigureWarning, match="does not match the exact restorable shape"
+    ):
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    assert len(restored.axes[0].containers) == 0
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_errorbar_with_mismatched_cap_position_remains_recoverable() -> None:
+    fig, ax = plt.subplots()
+    container = ax.errorbar([1.0, 2.0], [3.0, 4.0], yerr=0.5, fmt="o", capsize=4)
+    _, caps, _ = container.lines
+    caps[0].set_ydata([caps[0].get_ydata()[0] + 1.0, caps[0].get_ydata()[1]])
+
+    with pytest.warns(
+        UnsupportedFigureWarning, match="does not match the exact restorable shape"
+    ):
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    assert len(restored.axes[0].containers) == 0
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_errorbar_with_translated_bar_remains_recoverable() -> None:
+    # contains_branch() accepts an extra affine step chained onto transData,
+    # so only an exact transform identity check catches a bar collection
+    # that was translated independently of the Axes' data transform.
+    fig, ax = plt.subplots()
+    container = ax.errorbar([1.0, 2.0], [3.0, 4.0], yerr=0.5, fmt="o", capsize=0)
+    _, _, bars = container.lines
+    bars[0].set_transform(Affine2D().translate(1.0, 0.0) + ax.transData)
+
+    with pytest.warns(
+        UnsupportedFigureWarning, match="does not match the exact restorable shape"
+    ):
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    assert len(restored.axes[0].containers) == 0
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_errorbar_with_inconsistent_bar_linewidth_remains_recoverable() -> None:
+    fig, ax = plt.subplots()
+    container = ax.errorbar(
+        [1.0, 2.0], [3.0, 4.0], yerr=0.5, xerr=0.5, fmt="o", capsize=0
+    )
+    _, _, bars = container.lines
+    bars[1].set_linewidth(5.0)
+
+    with pytest.warns(
+        UnsupportedFigureWarning, match="does not match the exact restorable shape"
+    ):
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    assert len(restored.axes[0].containers) == 0
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_errorbar_with_dashed_bars_remains_recoverable() -> None:
+    fig, ax = plt.subplots()
+    container = ax.errorbar([1.0, 2.0], [3.0, 4.0], yerr=0.5, fmt="o", capsize=0)
+    _, _, bars = container.lines
+    bars[0].set_linestyle("--")
+
+    with pytest.warns(
+        UnsupportedFigureWarning, match="does not match the exact restorable shape"
+    ):
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    assert len(restored.axes[0].containers) == 0
     plt.close(fig)
     plt.close(restored)
 
@@ -1036,7 +1276,12 @@ def test_cross_version_patch_errorbar_fixture_restores_exactly(
     assert type(container) is ErrorbarContainer
     assert container.get_label() == "errbar"
     dataline, caps, bars = container.lines
+    assert container[0] is dataline
     np.testing.assert_allclose(dataline.get_xdata(orig=False), [0.5, 1.5, 2.5])
     assert len(caps) == 4
     assert len(bars) == 2
+    for cap in caps:
+        np.testing.assert_allclose(
+            to_rgba(cap.get_markeredgecolor()), to_rgba("orange")
+        )
     plt.close(restored)
