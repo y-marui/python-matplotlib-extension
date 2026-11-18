@@ -135,6 +135,12 @@ SLIDE_LAYOUT: Final = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?
 </p:sldLayout>
 """
 
+SLIDE_LAYOUT_RELS: Final = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/>
+</Relationships>
+"""
+
 THEME: Final = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office Theme">
 <a:themeElements>
@@ -212,6 +218,7 @@ def slide_xml(index: int, x: int, y: int, cx: int, cy: int) -> bytes:
 <a:graphic>
 <a:graphicData uri="http://schemas.openxmlformats.org/presentationml/2006/ole">
 <p:oleObj name="Figure {index}" r:id="rId2" imgW="{cx}" imgH="{cy}" progId="Package">
+<p:embed/>
 <p:pic>
 <p:nvPicPr><p:cNvPr id="0" name=""/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
 <p:blipFill><a:blip r:embed="rId3"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>

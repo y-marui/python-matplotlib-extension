@@ -401,6 +401,9 @@ def embed_pptx(editable_pngs: Sequence[bytes]) -> bytes:
             pptx_templates.SLIDE_MASTER_RELS
         ),
         "ppt/slideLayouts/slideLayout1.xml": pptx_templates.SLIDE_LAYOUT,
+        "ppt/slideLayouts/_rels/slideLayout1.xml.rels": (
+            pptx_templates.SLIDE_LAYOUT_RELS
+        ),
         "ppt/theme/theme1.xml": pptx_templates.THEME,
     }
     for index, editable_png in enumerate(editable_pngs, start=1):

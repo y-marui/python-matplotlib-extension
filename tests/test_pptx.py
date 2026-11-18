@@ -13,6 +13,9 @@ from matplotlib_extension.package import PackageError, load_package
 _OLE_RELATIONSHIP_TYPE = (
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject"
 )
+_SLIDE_MASTER_RELATIONSHIP_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster"
+)
 
 
 def _expected_parts(slide_count: int) -> set[str]:
@@ -26,6 +29,7 @@ def _expected_parts(slide_count: int) -> set[str]:
         "ppt/slideMasters/slideMaster1.xml",
         "ppt/slideMasters/_rels/slideMaster1.xml.rels",
         "ppt/slideLayouts/slideLayout1.xml",
+        "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
         "ppt/theme/theme1.xml",
     }
     for index in range(1, slide_count + 1):
@@ -109,6 +113,47 @@ def test_save_pptx_has_exactly_one_ole_relationship_and_content_type(
             element for element in slide_xml.iter() if element.tag.endswith("oleObj")
         ]
         assert len(ole_object_elements) == 1
+    plt.close(fig)
+
+
+def test_save_pptx_slide_layout_has_slide_master_relationship(
+    tmp_path: Path,
+) -> None:
+    fig = _figure()
+    destination = tmp_path / "figure.pptx"
+
+    pyplot.save_pptx([fig], destination)
+
+    with zipfile.ZipFile(destination) as archive:
+        layout_rels_bytes = archive.read("ppt/slideLayouts/_rels/slideLayout1.xml.rels")
+        layout_rels = ElementTree.fromstring(layout_rels_bytes)
+        master_relationships = [
+            element
+            for element in layout_rels
+            if element.attrib.get("Type") == _SLIDE_MASTER_RELATIONSHIP_TYPE
+        ]
+        assert len(master_relationships) == 1
+        assert (
+            master_relationships[0].attrib["Target"]
+            == "../slideMasters/slideMaster1.xml"
+        )
+    plt.close(fig)
+
+
+def test_save_pptx_ole_object_has_embed_child(tmp_path: Path) -> None:
+    fig = _figure()
+    destination = tmp_path / "figure.pptx"
+
+    pyplot.save_pptx([fig], destination)
+
+    with zipfile.ZipFile(destination) as archive:
+        slide_xml = ElementTree.fromstring(archive.read("ppt/slides/slide1.xml"))
+        ole_object = next(
+            element for element in slide_xml.iter() if element.tag.endswith("oleObj")
+        )
+        children = list(ole_object)
+        assert children[0].tag.endswith("embed")
+        assert children[1].tag.endswith("pic")
     plt.close(fig)
 
 
