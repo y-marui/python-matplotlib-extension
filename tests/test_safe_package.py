@@ -13,9 +13,11 @@ import olefile
 import pytest
 from matplotlib.axes import Axes
 from matplotlib.collections import PathCollection
-from matplotlib.colors import ListedColormap
+from matplotlib.colors import ListedColormap, to_rgba
+from matplotlib.container import ErrorbarContainer
 from matplotlib.image import AxesImage
 from matplotlib.lines import Line2D
+from matplotlib.patches import Circle, Ellipse, Polygon, Rectangle, Wedge
 from matplotlib.projections import register_projection
 from matplotlib.scale import LinearScale, register_scale
 from PIL import Image
@@ -73,7 +75,7 @@ def test_package_is_deterministic_and_data_only() -> None:
             info.compress_type == zipfile.ZIP_STORED for info in archive.infolist()
         )
         figure_spec = json.loads(archive.read("figure.json"))
-        assert figure_spec["schema_version"] == 2
+        assert figure_spec["schema_version"] == 3
     assert inspect_package(first)["format_version"] == 1
     plt.close(fig)
 
@@ -631,4 +633,410 @@ def test_legend_referencing_unrestorable_scatter_is_skipped() -> None:
     restored = load_package(payload)
     assert restored.axes[0].get_legend() is None
     plt.close(fig)
+    plt.close(restored)
+
+
+def test_rectangle_round_trips_exactly() -> None:
+    fig, ax = plt.subplots()
+    ax.add_patch(
+        Rectangle(
+            (1.0, 2.0),
+            3.0,
+            4.0,
+            angle=15.0,
+            facecolor="red",
+            edgecolor="blue",
+            linewidth=2.0,
+            alpha=0.5,
+            label="rect",
+        )
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnsupportedFigureWarning)
+        payload = dump_package(fig)
+
+    assert inspect_package(payload)["warnings"] == []
+    restored = load_package(payload)
+    patches = restored.axes[0].patches
+    assert len(patches) == 1
+    patch = patches[0]
+    assert type(patch) is Rectangle
+    assert patch.get_label() == "rect"
+    assert patch.get_xy() == (1.0, 2.0)
+    assert patch.get_width() == 3.0
+    assert patch.get_height() == 4.0
+    assert patch.get_angle() == 15.0
+    np.testing.assert_allclose(patch.get_facecolor(), [1.0, 0.0, 0.0, 0.5])
+    np.testing.assert_allclose(patch.get_edgecolor(), [0.0, 0.0, 1.0, 0.5])
+    assert patch.get_alpha() == 0.5
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_circle_round_trips_exactly() -> None:
+    fig, ax = plt.subplots()
+    ax.add_patch(Circle((5.0, 5.0), radius=2.5, facecolor="green", label="circ"))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnsupportedFigureWarning)
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    patch = restored.axes[0].patches[0]
+    assert type(patch) is Circle
+    assert patch.center == (5.0, 5.0)
+    assert patch.radius == 2.5
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_polygon_round_trips_exactly() -> None:
+    fig, ax = plt.subplots()
+    ax.add_patch(
+        Polygon(
+            [[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]],
+            closed=True,
+            facecolor="yellow",
+            label="poly",
+        )
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnsupportedFigureWarning)
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    patch = restored.axes[0].patches[0]
+    assert type(patch) is Polygon
+    assert patch.get_closed() is True
+    np.testing.assert_allclose(
+        patch.get_xy(), [[0.0, 0.0], [1.0, 0.0], [0.5, 1.0], [0.0, 0.0]]
+    )
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_wedge_round_trips_exactly() -> None:
+    fig, ax = plt.subplots()
+    ax.add_patch(Wedge((2.0, 2.0), 3.0, 10.0, 80.0, width=1.0, label="wedge"))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnsupportedFigureWarning)
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    patch = restored.axes[0].patches[0]
+    assert type(patch) is Wedge
+    assert patch.center == (2.0, 2.0)
+    assert patch.r == 3.0
+    assert patch.theta1 == 10.0
+    assert patch.theta2 == 80.0
+    assert patch.width == 1.0
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_patch_with_non_data_transform_remains_recoverable(tmp_path: Path) -> None:
+    fig, ax = plt.subplots()
+    ax.add_patch(
+        Rectangle((0.1, 0.1), 0.2, 0.2, transform=ax.transAxes, label="axes-space")
+    )
+    path = tmp_path / "patch.mpl.png"
+
+    with pytest.warns(UnsupportedFigureWarning, match="Stored raw numeric data"):
+        savefig(fig, path)
+
+    records = recover_data(path)
+    assert len(records) == 1
+    assert records[0]["artist_type"] == "Rectangle"
+    assert records[0]["label"] == "axes-space"
+    restored = load_package(dump_package(fig))
+    assert len(restored.axes[0].patches) == 0
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_rectangle_with_custom_rotation_point_remains_recoverable(
+    tmp_path: Path,
+) -> None:
+    fig, ax = plt.subplots()
+    ax.add_patch(
+        Rectangle(
+            (0.0, 0.0), 1.0, 1.0, angle=30.0, rotation_point=(0.5, 0.5), label="custom"
+        )
+    )
+    path = tmp_path / "patch.mpl.png"
+
+    with pytest.warns(UnsupportedFigureWarning, match="Stored raw numeric data"):
+        savefig(fig, path)
+
+    records = recover_data(path)
+    assert len(records) == 1
+    assert records[0]["artist_type"] == "Rectangle"
+    plt.close(fig)
+
+
+def test_patch_with_array_alpha_remains_recoverable() -> None:
+    # Patch.set_alpha() rejects an array outright through the public API
+    # (and the Agg renderer cannot draw such a patch either), so the
+    # private attribute is set directly, without rendering, to exercise the
+    # same scalar-only alpha guard used for scatter/image, defensively kept
+    # for this type too.
+    fig, ax = plt.subplots()
+    patch = Rectangle((0.0, 0.0), 1.0, 1.0, label="varied-alpha")
+    ax.add_patch(patch)
+    patch._alpha = np.array([0.2, 0.8])
+
+    with pytest.warns(UnsupportedFigureWarning, match="Stored raw numeric data"):
+        payload = dump_package(fig)
+
+    records = recover_numeric_data(payload)
+    assert len(records) == 1
+    assert records[0]["artist_type"] == "Rectangle"
+    plt.close(fig)
+
+
+def test_patch_with_unsupported_subclass_is_skipped() -> None:
+    fig, ax = plt.subplots()
+    ax.add_patch(Ellipse((0.0, 0.0), 1.0, 2.0, label="ellipse"))
+
+    with pytest.warns(
+        UnsupportedFigureWarning, match="Skipped unsupported patch class Ellipse"
+    ):
+        payload = dump_package(fig)
+
+    assert recover_numeric_data(payload) == []
+    restored = load_package(payload)
+    assert len(restored.axes[0].patches) == 0
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_legend_with_patch_handle_round_trips_exactly() -> None:
+    fig, ax = plt.subplots()
+    ax.plot([0.0, 1.0], [0.0, 1.0], label="line")
+    ax.add_patch(Circle((0.0, 0.0), radius=1.0, label="circ"))
+    ax.legend()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnsupportedFigureWarning)
+        payload = dump_package(fig)
+
+    assert inspect_package(payload)["warnings"] == []
+    restored = load_package(payload)
+    legend = restored.axes[0].get_legend()
+    assert legend is not None
+    assert [text.get_text() for text in legend.get_texts()] == ["line", "circ"]
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_legend_referencing_unrestorable_patch_is_skipped() -> None:
+    fig, ax = plt.subplots()
+    ax.add_patch(Ellipse((0.0, 0.0), 1.0, 2.0, label="ellipse"))
+    ax.legend()
+
+    with pytest.warns(
+        UnsupportedFigureWarning,
+        match="Skipped legend referencing an artist",
+    ):
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    assert restored.axes[0].get_legend() is None
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_errorbar_round_trips_exactly() -> None:
+    fig, ax = plt.subplots()
+    ax.errorbar(
+        [1.0, 2.0, 3.0],
+        [4.0, 5.0, 6.0],
+        yerr=[[0.1, 0.2, 0.3], [0.3, 0.2, 0.1]],
+        xerr=0.05,
+        fmt="s--",
+        color="purple",
+        ecolor="orange",
+        elinewidth=1.5,
+        capsize=5,
+        capthick=2.0,
+        alpha=0.8,
+        label="errbar",
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnsupportedFigureWarning)
+        payload = dump_package(fig)
+
+    assert inspect_package(payload)["warnings"] == []
+    restored = load_package(payload)
+    ax2 = restored.axes[0]
+    assert len(ax2.containers) == 1
+    container = ax2.containers[0]
+    assert type(container) is ErrorbarContainer
+    assert container.get_label() == "errbar"
+    dataline, caps, bars = container.lines
+    assert type(dataline) is Line2D
+    np.testing.assert_allclose(dataline.get_xdata(orig=False), [1.0, 2.0, 3.0])
+    np.testing.assert_allclose(dataline.get_ydata(orig=False), [4.0, 5.0, 6.0])
+    np.testing.assert_allclose(to_rgba(dataline.get_color()), to_rgba("purple"))
+    assert dataline.get_linestyle() == "--"
+    assert len(caps) == 4
+    assert len(bars) == 2
+    for bar in bars:
+        np.testing.assert_allclose(bar.get_alpha(), 0.8)
+    np.testing.assert_allclose(bars[1].get_segments()[0], [[1.0, 3.9], [1.0, 4.3]])
+    np.testing.assert_allclose(bars[0].get_segments()[0], [[0.95, 4.0], [1.05, 4.0]])
+    # The data line plus the 4 cap Line2Ds (ax.lines), with the 2 bar
+    # LineCollections living in ax.collections.
+    assert len(ax2.lines) == 5
+    assert len(ax2.collections) == 2
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_errorbar_without_caps_round_trips_exactly() -> None:
+    fig, ax = plt.subplots()
+    ax.errorbar(
+        [1.0, 2.0], [3.0, 4.0], yerr=0.5, xerr=0.25, fmt="o", capsize=0, label="nocap"
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnsupportedFigureWarning)
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    container = restored.axes[0].containers[0]
+    _, caps, bars = container.lines
+    assert caps == ()
+    assert len(bars) == 2
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_errorbar_yerr_only_round_trips_exactly() -> None:
+    fig, ax = plt.subplots()
+    ax.errorbar([1.0, 2.0], [3.0, 4.0], yerr=0.5, fmt="o", capsize=3, label="yonly")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnsupportedFigureWarning)
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    container = restored.axes[0].containers[0]
+    assert container.has_xerr is False
+    assert container.has_yerr is True
+    _, caps, bars = container.lines
+    assert len(caps) == 2
+    assert all(cap.get_marker() == "_" for cap in caps)
+    assert len(bars) == 1
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_errorbar_with_fmt_none_remains_recoverable() -> None:
+    fig, ax = plt.subplots()
+    ax.errorbar([1.0, 2.0], [3.0, 4.0], yerr=0.5, fmt="none", label="none-fmt")
+
+    with pytest.warns(
+        UnsupportedFigureWarning, match="Skipped unsupported collection class"
+    ):
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    assert len(restored.axes[0].containers) == 0
+    assert len(restored.axes[0].collections) == 0
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_errorbar_with_onesided_limits_remains_recoverable() -> None:
+    fig, ax = plt.subplots()
+    ax.errorbar(
+        [1.0, 2.0], [3.0, 4.0], yerr=0.5, fmt="o", capsize=4, uplims=True, label="lims"
+    )
+
+    with pytest.warns(
+        UnsupportedFigureWarning, match="does not match the exact restorable shape"
+    ):
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    assert len(restored.axes[0].containers) == 0
+    # The data line and the two cap Line2Ds (still exactly Line2D, just with
+    # a non-"_"/"|" marker for the one-sided limit) round-trip individually.
+    assert len(restored.axes[0].lines) == 3
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_legend_with_errorbar_handle_round_trips_exactly() -> None:
+    fig, ax = plt.subplots()
+    ax.plot([0.0, 1.0], [0.0, 1.0], label="line")
+    ax.errorbar([1.0, 2.0], [3.0, 4.0], yerr=0.5, fmt="o", capsize=3, label="errbar")
+    ax.legend()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnsupportedFigureWarning)
+        payload = dump_package(fig)
+
+    assert inspect_package(payload)["warnings"] == []
+    restored = load_package(payload)
+    legend = restored.axes[0].get_legend()
+    assert legend is not None
+    assert [text.get_text() for text in legend.get_texts()] == ["line", "errbar"]
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_legend_referencing_unrestorable_errorbar_is_skipped() -> None:
+    fig, ax = plt.subplots()
+    ax.errorbar(
+        [1.0, 2.0], [3.0, 4.0], yerr=0.5, fmt="o", capsize=4, uplims=True, label="lims"
+    )
+    ax.legend()
+
+    with pytest.warns(
+        UnsupportedFigureWarning,
+        match="does not match the exact restorable shape",
+    ):
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    assert restored.axes[0].get_legend() is None
+    plt.close(fig)
+    plt.close(restored)
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "patch_errorbar_matplotlib-3.10.0.mplpkg",
+        "patch_errorbar_matplotlib-3.11.2.mplpkg",
+    ],
+)
+def test_cross_version_patch_errorbar_fixture_restores_exactly(
+    fixture_name: str,
+) -> None:
+    payload = (_FIXTURES_DIR / fixture_name).read_bytes()
+
+    restored = load_package(payload)
+    ax = restored.axes[0]
+
+    patch_types = {type(patch).__name__: patch for patch in ax.patches}
+    assert set(patch_types) == {"Rectangle", "Circle", "Polygon", "Wedge"}
+    assert patch_types["Rectangle"].get_label() == "rect"
+    assert patch_types["Circle"].center == (1.5, 1.5)
+    assert patch_types["Wedge"].theta1 == 10.0
+
+    assert len(ax.containers) == 1
+    container = ax.containers[0]
+    assert type(container) is ErrorbarContainer
+    assert container.get_label() == "errbar"
+    dataline, caps, bars = container.lines
+    np.testing.assert_allclose(dataline.get_xdata(orig=False), [0.5, 1.5, 2.5])
+    assert len(caps) == 4
+    assert len(bars) == 2
     plt.close(restored)
