@@ -7,13 +7,16 @@ import binascii
 import re
 import struct
 import uuid
+import zipfile
 import zlib
+from collections.abc import Sequence
 from io import BytesIO
 from typing import Any, Final, cast
 
 import olefile
 from pypdf import PdfReader, PdfWriter
 
+from matplotlib_extension import pptx_templates
 from matplotlib_extension.package import (
     MAX_PACKAGE_BYTES,
     PackageError,
@@ -31,6 +34,7 @@ SVG_NAMESPACE: Final = "https://github.com/y-marui/python-matplotlib-extension"
 MAX_RENDERED_BYTES: Final = 512 * 1024 * 1024
 MAX_EDITABLE_PNG_BYTES: Final = MAX_PACKAGE_BYTES + MAX_RENDERED_BYTES
 MAX_OLE_BYTES: Final = MAX_EDITABLE_PNG_BYTES + 16 * 1024 * 1024
+_PPTX_FRAME_MARGIN: Final = 457_200
 
 _SVG_PACKAGE_RE = re.compile(
     rb'<mplex:package\s+xmlns:mplex="https://github\.com/y-marui/python-matplotlib-extension"'
@@ -343,6 +347,80 @@ def embed_ole(editable_png: bytes) -> bytes:
     )
     header = header.ljust(sector_size, b"\x00")
     return header + b"".join(sectors)
+
+
+def _pptx_frame_geometry(editable_png: bytes) -> tuple[int, int, int, int]:
+    """Fit the native PNG's pixel size into the slide, centered, as (x, y, cx, cy)."""
+    if len(editable_png) < 24 or editable_png[12:16] != b"IHDR":
+        raise PackageError("Invalid PNG header for PPTX frame sizing")
+    pixel_width, pixel_height = struct.unpack(">II", editable_png[16:24])
+    if pixel_width <= 0 or pixel_height <= 0:
+        raise PackageError("Invalid PNG dimensions for PPTX frame sizing")
+    max_cx = pptx_templates.PPTX_SLIDE_WIDTH - 2 * _PPTX_FRAME_MARGIN
+    max_cy = pptx_templates.PPTX_SLIDE_HEIGHT - 2 * _PPTX_FRAME_MARGIN
+    scale = min(max_cx / pixel_width, max_cy / pixel_height)
+    cx = max(1, round(pixel_width * scale))
+    cy = max(1, round(pixel_height * scale))
+    x = (pptx_templates.PPTX_SLIDE_WIDTH - cx) // 2
+    y = (pptx_templates.PPTX_SLIDE_HEIGHT - cy) // 2
+    return x, y, cx, cy
+
+
+def _pptx_zip_info(name: str) -> zipfile.ZipInfo:
+    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.create_system = 3
+    info.external_attr = 0o100644 << 16
+    return info
+
+
+def embed_pptx(editable_pngs: Sequence[bytes]) -> bytes:
+    """Wrap one editable PNG per slide in a minimal, portable PPTX presentation.
+
+    Each editable PNG becomes its own slide, in order, each holding exactly
+    one OLE-object graphic frame. The embedded native file for each slide is
+    the generic Package CFB object produced by :func:`embed_ole`; the same
+    editable PNG is reused as that slide's rendered fallback image, so the
+    shape displays before activation. Building this package never requires
+    Windows COM, PowerPoint, or OLE activation.
+    """
+    if not editable_pngs:
+        raise PackageError("PPTX generation requires at least one editable PNG")
+    slide_count = len(editable_pngs)
+    parts: dict[str, bytes] = {
+        "[Content_Types].xml": pptx_templates.content_types(slide_count),
+        "_rels/.rels": pptx_templates.ROOT_RELS,
+        "docProps/core.xml": pptx_templates.CORE_PROPERTIES,
+        "docProps/app.xml": pptx_templates.app_properties(slide_count),
+        "ppt/presentation.xml": pptx_templates.presentation(slide_count),
+        "ppt/_rels/presentation.xml.rels": pptx_templates.presentation_rels(
+            slide_count
+        ),
+        "ppt/slideMasters/slideMaster1.xml": pptx_templates.SLIDE_MASTER,
+        "ppt/slideMasters/_rels/slideMaster1.xml.rels": (
+            pptx_templates.SLIDE_MASTER_RELS
+        ),
+        "ppt/slideLayouts/slideLayout1.xml": pptx_templates.SLIDE_LAYOUT,
+        "ppt/slideLayouts/_rels/slideLayout1.xml.rels": (
+            pptx_templates.SLIDE_LAYOUT_RELS
+        ),
+        "ppt/theme/theme1.xml": pptx_templates.THEME,
+    }
+    for index, editable_png in enumerate(editable_pngs, start=1):
+        x, y, cx, cy = _pptx_frame_geometry(editable_png)
+        parts[f"ppt/slides/slide{index}.xml"] = pptx_templates.slide_xml(
+            index, x, y, cx, cy
+        )
+        parts[f"ppt/slides/_rels/slide{index}.xml.rels"] = pptx_templates.slide_rels(
+            index
+        )
+        parts[f"ppt/embeddings/oleObject{index}.bin"] = embed_ole(editable_png)
+        parts[f"ppt/media/image{index}.png"] = editable_png
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w", allowZip64=True) as archive:
+        for name, data in parts.items():
+            archive.writestr(_pptx_zip_info(name), data)
+    return output.getvalue()
 
 
 def _read_cstring(data: bytes, position: int) -> tuple[bytes, int]:

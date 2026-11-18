@@ -1,6 +1,6 @@
 import os
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from functools import wraps
 from io import BytesIO
 from pathlib import Path
@@ -18,6 +18,7 @@ from matplotlib_extension.container import (
     embed_ole,
     embed_pdf,
     embed_png,
+    embed_pptx,
     embed_svg,
     extract_ole_native_png,
     extract_payload,
@@ -136,6 +137,43 @@ def savefig(
         else:
             output = embed_svg(rendered.getvalue(), payload)
     _write_file(destination, output, mode)
+
+
+def save_pptx(
+    figs: Sequence[matplotlib.figure.Figure],
+    filename: Path | str,
+    *,
+    mode: str = "w",
+    **kwargs: Any,
+) -> None:
+    """Save one or more Figures into one portable PPTX, one Figure per slide.
+
+    Each Figure is embedded as its own OLE-object slide, in the given order,
+    the same way a single Figure is embedded by ``savefig(..., format="ole")``.
+    Building the presentation never requires Windows COM, PowerPoint, or OLE
+    activation.
+
+    Args:
+        figs: One or more exact allowlisted Matplotlib ``Figure`` objects,
+            saved in order as one slide per Figure.
+        filename: Destination PPTX path.
+        mode: ``"w"`` for atomic overwrite or ``"x"`` for exclusive create.
+        **kwargs: Normal Matplotlib ``savefig`` keyword arguments, applied to
+            every Figure's rendered PNG.
+    """
+    destination = Path(filename)
+    if mode not in {"x", "w"}:
+        raise ValueError("mode must be 'x' or 'w'; editable append is not supported")
+    figures = list(figs)
+    if not figures:
+        raise ValueError("save_pptx requires at least one Figure")
+    editable_pngs: list[bytes] = []
+    for fig in figures:
+        payload = dump_package(fig)
+        rendered = BytesIO()
+        _ORIGINAL_FIGURE_SAVEFIG(fig, rendered, format="png", **kwargs)
+        editable_pngs.append(embed_png(rendered.getvalue(), payload))
+    _write_file(destination, embed_pptx(editable_pngs), mode)
 
 
 def _read_file(filename: Path | str) -> bytes:

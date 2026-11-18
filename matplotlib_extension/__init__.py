@@ -6,6 +6,7 @@ from matplotlib_extension.pyplot import (
     install_matplotlib_savefig,
     loadfig,
     recover_data,
+    save_pptx,
     savefig,
 )
 
@@ -18,5 +19,6 @@ __all__ = [
     "install_matplotlib_savefig",
     "loadfig",
     "recover_data",
+    "save_pptx",
     "savefig",
 ]
