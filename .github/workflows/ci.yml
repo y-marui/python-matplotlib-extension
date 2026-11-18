@@ -100,7 +100,9 @@ jobs:
           enable-cache: ${{ !(vars.LINUX_RUNNER && !github.event.pull_request.head.repo.fork) }}
           python-version: ${{ matrix.python-version }}
       - run: uv sync --group dev
-      - run: uv run pytest
+      - run: uv run pytest -m "not fuzz"
+      - name: Fuzz targets (property-based parser hardening, see tests/fuzz_support.py)
+        run: uv run pytest -m fuzz
       - name: Prune local uv cache
         if: ${{ always() && vars.LINUX_RUNNER && !github.event.pull_request.head.repo.fork }}
         run: uv cache prune --ci
