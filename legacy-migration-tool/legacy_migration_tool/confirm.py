@@ -49,12 +49,24 @@ class NonInteractiveRefusalError(ConfirmationError):
     """Raised when run without a TTY and without the automation flag."""
 
 
+class ConversionConsent:
+    """Proof that :func:`confirm_once` granted consent for this process.
+
+    :func:`legacy_migration_tool.convert.convert_file` requires one of
+    these before it will import ``dill``, so a caller cannot reach
+    deserialization by calling ``convert_file`` directly without first
+    going through this module's confirmation gate.
+    """
+
+    __slots__ = ()
+
+
 def confirm_once(
     *,
     allow_non_interactive: bool,
     stdin: TextIO | None = None,
     stdout: TextIO | None = None,
-) -> None:
+) -> ConversionConsent:
     """Gate one tool invocation before any legacy deserialization.
 
     Call this exactly once per process, before converting any input file.
@@ -68,6 +80,9 @@ def confirm_once(
         stdout: Stream the warning and notices are written to. Defaults
             to ``sys.stdout``; overridable for tests.
 
+    Returns:
+        A :class:`ConversionConsent` token to pass to ``convert_file``.
+
     Raises:
         NonInteractiveRefusalError: No TTY and ``allow_non_interactive``
             is false.
@@ -79,15 +94,17 @@ def confirm_once(
 
     if allow_non_interactive:
         out_stream.write(_AUTOMATION_NOTICE)
-        return
+        return ConversionConsent()
 
     if not in_stream.isatty():
         raise NonInteractiveRefusalError(_REFUSAL_MESSAGE)
 
     out_stream.write(_WARNING)
+    out_stream.flush()
     response = in_stream.readline().rstrip("\r\n")
     if response != CONFIRMATION_PHRASE:
         raise ConfirmationError(
             "Confirmation phrase did not match exactly; aborting without "
             "converting anything."
         )
+    return ConversionConsent()

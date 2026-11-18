@@ -10,7 +10,12 @@ import numpy as np
 import pytest
 from pypdf import PdfReader, PdfWriter
 
+from legacy_migration_tool.confirm import confirm_once
 from legacy_migration_tool.convert import LegacyConversionError, convert_file
+
+
+def _consent():
+    return confirm_once(allow_non_interactive=True)
 
 
 def _render_base_pdf() -> bytes:
@@ -44,7 +49,7 @@ def test_convert_file_round_trips_through_plain_loadfig(tmp_path: Path) -> None:
     output_dir = tmp_path / "out"
     output_dir.mkdir()
 
-    output_path = convert_file(legacy, output_dir)
+    output_path = convert_file(legacy, output_dir, _consent())
 
     assert output_path.name == "legacy.mpl.png"
     restored = matplotlib_extension.loadfig(output_path)
@@ -63,7 +68,7 @@ def test_convert_file_rejects_input_without_the_legacy_attachment(
     output_dir.mkdir()
 
     with pytest.raises(LegacyConversionError, match="no 'fig.dill' attachment"):
-        convert_file(plain, output_dir)
+        convert_file(plain, output_dir, _consent())
 
 
 def test_convert_file_rejects_non_figure_object_streams(tmp_path: Path) -> None:
@@ -83,7 +88,29 @@ def test_convert_file_rejects_non_figure_object_streams(tmp_path: Path) -> None:
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     with pytest.raises(LegacyConversionError, match="not a Matplotlib Figure"):
-        convert_file(not_a_figure, output_dir)
+        convert_file(not_a_figure, output_dir, _consent())
+
+
+def test_convert_file_refuses_without_confirmation_before_touching_the_file(
+    tmp_path: Path,
+) -> None:
+    nonexistent = tmp_path / "does-not-exist.plt.pdf"
+    output_dir = tmp_path / "out"
+
+    with pytest.raises(LegacyConversionError, match="without confirmation"):
+        convert_file(nonexistent, output_dir, None)  # type: ignore[arg-type]
+
+
+def test_convert_file_wraps_a_save_failure_as_legacy_conversion_error(
+    tmp_path: Path,
+) -> None:
+    legacy = _make_legacy_pdf(tmp_path)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "legacy.mpl.png").write_bytes(b"pre-existing output file")
+
+    with pytest.raises(LegacyConversionError, match="failed to save"):
+        convert_file(legacy, output_dir, _consent())
 
 
 def test_only_convert_module_imports_dill() -> None:

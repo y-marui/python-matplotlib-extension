@@ -14,8 +14,11 @@ from pathlib import Path
 
 import matplotlib.figure
 import matplotlib_extension
+from matplotlib_extension import PackageError
 from matplotlib_extension.container import LEGACY_PDF_ATTACHMENT
 from pypdf import PdfReader
+
+from legacy_migration_tool.confirm import ConversionConsent
 
 
 class LegacyConversionError(RuntimeError):
@@ -53,27 +56,40 @@ def _canonical_stem(input_path: Path) -> str:
     return input_path.stem
 
 
-def convert_file(input_path: Path, output_dir: Path) -> Path:
+def convert_file(
+    input_path: Path, output_dir: Path, consent: ConversionConsent
+) -> Path:
     """Convert one legacy ``.plt.pdf`` file to a safe ``.mpl.png``.
 
-    Must only be called after :func:`legacy_migration_tool.confirm.confirm_once`
-    has already granted confirmation for this process. Imports ``dill``
-    locally, at call time, so merely importing this module never pulls
-    in the arbitrary-code-execution risk.
+    Requires a :class:`~legacy_migration_tool.confirm.ConversionConsent`
+    obtained from :func:`legacy_migration_tool.confirm.confirm_once`;
+    without one, this refuses before importing ``dill`` or reading the
+    input file. Imports ``dill`` locally, at call time, so merely
+    importing this module never pulls in the arbitrary-code-execution
+    risk.
 
     Args:
         input_path: A legacy ``.plt.pdf`` file containing a
             ``fig.dill`` attachment.
         output_dir: The single dedicated directory to write into.
+        consent: The token returned by ``confirm_once()`` for this
+            process.
 
     Returns:
         The path to the newly written ``.mpl.png`` file.
 
     Raises:
-        LegacyConversionError: The input is not a recognized legacy file,
-            or its object stream does not deserialize to a Matplotlib
-            ``Figure``.
+        LegacyConversionError: Consent was not granted, the input is not
+            a recognized legacy file, its object stream does not
+            deserialize to a Matplotlib ``Figure``, or the converted
+            output could not be saved.
     """
+    if not isinstance(consent, ConversionConsent):
+        raise LegacyConversionError(
+            f"{input_path}: refusing to deserialize without confirmation; "
+            "call confirm_once() first and pass its ConversionConsent here"
+        )
+
     import dill  # noqa: PLC0415 - intentionally local; see module docstring
 
     blob = _read_legacy_attachment(input_path)
@@ -89,5 +105,10 @@ def convert_file(input_path: Path, output_dir: Path) -> Path:
         )
 
     output_path = output_dir / f"{_canonical_stem(input_path)}.mpl.png"
-    matplotlib_extension.savefig(fig, output_path, editable=True, mode="x")
+    try:
+        matplotlib_extension.savefig(fig, output_path, editable=True, mode="x")
+    except (OSError, PackageError) as exc:
+        raise LegacyConversionError(
+            f"{input_path}: failed to save converted output to {output_path}: {exc}"
+        ) from exc
     return output_path

@@ -3,7 +3,7 @@ name = "legacy-migration-tool"
 version = "0.1.0"
 description = "Deprecated, isolated one-way converter from legacy dill-based .plt.pdf figures to the matplotlib-extension safe .mpl.png format"
 readme = "README.md"
-license = {file = "../LICENSE"}
+license = {file = "LICENSE"}
 requires-python = ">=3.11"
 dependencies = [
     "dill>=0.3.8",

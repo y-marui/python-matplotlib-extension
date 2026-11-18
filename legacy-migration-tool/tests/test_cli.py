@@ -2,6 +2,7 @@ from io import BytesIO
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import pytest
 from pypdf import PdfReader, PdfWriter
 
 from legacy_migration_tool import cli
@@ -85,3 +86,40 @@ def test_allow_flag_converts_and_validates_multiple_inputs_with_one_confirmation
 def test_confirmation_phrase_constant_is_not_a_generic_yes() -> None:
     assert CONFIRMATION_PHRASE.lower() not in {"y", "yes", "ok"}
     assert len(CONFIRMATION_PHRASE) > 10
+
+
+def test_abbreviated_allow_flag_is_rejected_not_silently_matched(
+    tmp_path: Path,
+) -> None:
+    legacy = _make_legacy_pdf(tmp_path, "legacy.plt.pdf")
+    output_dir = tmp_path / "out"
+
+    with pytest.raises(SystemExit):
+        cli.main(
+            [str(legacy), "--output-dir", str(output_dir), "--allow"],
+        )
+
+    assert not output_dir.exists() or not list(output_dir.iterdir())
+
+
+def test_a_save_failure_for_one_input_does_not_stop_the_batch(
+    tmp_path: Path,
+) -> None:
+    first = _make_legacy_pdf(tmp_path, "first.plt.pdf")
+    second = _make_legacy_pdf(tmp_path, "second.plt.pdf")
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "first.mpl.png").write_bytes(b"pre-existing, blocks exclusive create")
+
+    exit_code = cli.main(
+        [
+            str(first),
+            str(second),
+            "--output-dir",
+            str(output_dir),
+            "--allow-arbitrary-code-execution",
+        ]
+    )
+
+    assert exit_code == 1
+    assert (output_dir / "second.mpl.png").exists()

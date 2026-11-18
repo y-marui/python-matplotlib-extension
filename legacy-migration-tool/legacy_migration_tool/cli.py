@@ -26,6 +26,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "This executes arbitrary code embedded in each input file; "
             "read README.md before running it."
         ),
+        # Abbreviated long options (e.g. "--a" matching
+        # "--allow-arbitrary-code-execution") must never work: that would
+        # let an unintended flag bypass the confirmation prompt.
+        allow_abbrev=False,
     )
     parser.add_argument(
         "inputs",
@@ -73,7 +77,9 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
     try:
-        confirm_once(allow_non_interactive=args.allow_arbitrary_code_execution)
+        consent = confirm_once(
+            allow_non_interactive=args.allow_arbitrary_code_execution
+        )
     except ConfirmationError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -83,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     failures = 0
     for input_path in args.inputs:
         try:
-            output_path = convert_file(input_path, args.output_dir)
+            output_path = convert_file(input_path, args.output_dir, consent)
             run_validation(output_path)
         except LegacyConversionError as exc:
             print(str(exc), file=sys.stderr)
