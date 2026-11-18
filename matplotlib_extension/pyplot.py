@@ -1,6 +1,6 @@
 import os
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from functools import wraps
 from io import BytesIO
 from pathlib import Path
@@ -48,10 +48,8 @@ def _output_format(filename: Path, requested: object) -> str:
         output_format = "mplpkg"
     else:
         output_format = filename.suffix.lower().removeprefix(".")
-    if output_format not in {"pdf", "png", "svg", "ole", "mplpkg", "pptx"}:
-        raise ValueError(
-            "Editable figures support PDF, PNG, SVG, OLE, MPLPKG, and PPTX"
-        )
+    if output_format not in {"pdf", "png", "svg", "ole", "mplpkg"}:
+        raise ValueError("Editable figures support PDF, PNG, SVG, OLE, and MPLPKG")
     return output_format
 
 
@@ -104,7 +102,7 @@ def savefig(
     Args:
         fig: The exact allowlisted Matplotlib ``Figure`` to serialize.
         filename: Destination ending in ``.mpl.pdf``, ``.mpl.png``, ``.mpl.svg``,
-            ``.ole``, ``.mplpkg``, or ``.pptx``.
+            ``.ole``, or ``.mplpkg``.
         editable: When false, delegate to Matplotlib's original ``savefig``.
         mode: ``"w"`` for atomic overwrite or ``"x"`` for exclusive create.
         title: PDF outline title.
@@ -116,8 +114,8 @@ def savefig(
     requested_format = kwargs.pop("format", None)
     output_format = _output_format(destination, requested_format)
     if not editable:
-        if output_format in {"ole", "mplpkg", "pptx"}:
-            raise ValueError("OLE, MPLPKG, and PPTX are editable-only formats")
+        if output_format in {"ole", "mplpkg"}:
+            raise ValueError("OLE and MPLPKG are editable-only formats")
         _ORIGINAL_FIGURE_SAVEFIG(fig, destination, format=output_format, **kwargs)
         return
 
@@ -125,15 +123,10 @@ def savefig(
     payload = dump_package(fig)
     if output_format == "mplpkg":
         output = payload
-    elif output_format in {"ole", "pptx"}:
+    elif output_format == "ole":
         rendered = BytesIO()
         _ORIGINAL_FIGURE_SAVEFIG(fig, rendered, format="png", **kwargs)
-        editable_png = embed_png(rendered.getvalue(), payload)
-        output = (
-            embed_pptx(editable_png)
-            if output_format == "pptx"
-            else embed_ole(editable_png)
-        )
+        output = embed_ole(embed_png(rendered.getvalue(), payload))
     else:
         rendered = BytesIO()
         _ORIGINAL_FIGURE_SAVEFIG(fig, rendered, format=output_format, **kwargs)
@@ -144,6 +137,43 @@ def savefig(
         else:
             output = embed_svg(rendered.getvalue(), payload)
     _write_file(destination, output, mode)
+
+
+def save_pptx(
+    figs: Sequence[matplotlib.figure.Figure],
+    filename: Path | str,
+    *,
+    mode: str = "w",
+    **kwargs: Any,
+) -> None:
+    """Save one or more Figures into one portable PPTX, one Figure per slide.
+
+    Each Figure is embedded as its own OLE-object slide, in the given order,
+    the same way a single Figure is embedded by ``savefig(..., format="ole")``.
+    Building the presentation never requires Windows COM, PowerPoint, or OLE
+    activation.
+
+    Args:
+        figs: One or more exact allowlisted Matplotlib ``Figure`` objects,
+            saved in order as one slide per Figure.
+        filename: Destination PPTX path.
+        mode: ``"w"`` for atomic overwrite or ``"x"`` for exclusive create.
+        **kwargs: Normal Matplotlib ``savefig`` keyword arguments, applied to
+            every Figure's rendered PNG.
+    """
+    destination = Path(filename)
+    if mode not in {"x", "w"}:
+        raise ValueError("mode must be 'x' or 'w'; editable append is not supported")
+    figures = list(figs)
+    if not figures:
+        raise ValueError("save_pptx requires at least one Figure")
+    editable_pngs: list[bytes] = []
+    for fig in figures:
+        payload = dump_package(fig)
+        rendered = BytesIO()
+        _ORIGINAL_FIGURE_SAVEFIG(fig, rendered, format="png", **kwargs)
+        editable_pngs.append(embed_png(rendered.getvalue(), payload))
+    _write_file(destination, embed_pptx(editable_pngs), mode)
 
 
 def _read_file(filename: Path | str) -> bytes:

@@ -15,7 +15,19 @@ from typing import Final
 PPTX_SLIDE_WIDTH: Final = 9_144_000
 PPTX_SLIDE_HEIGHT: Final = 6_858_000
 
-CONTENT_TYPES: Final = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+_SLIDE_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.presentationml.slide+xml"
+)
+
+
+def content_types(slide_count: int) -> bytes:
+    """Content types for the package: fixed parts plus one Override per slide."""
+    slide_overrides = "".join(
+        f'<Override PartName="/ppt/slides/slide{index}.xml" '
+        f'ContentType="{_SLIDE_CONTENT_TYPE}"/>'
+        for index in range(1, slide_count + 1)
+    )
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
 <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
 <Default Extension="xml" ContentType="application/xml"/>
@@ -26,10 +38,11 @@ CONTENT_TYPES: Final = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"
 <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
 <Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>
 <Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>
-<Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+{slide_overrides}
 <Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>
 </Types>
-"""
+""".encode("ascii")
+
 
 ROOT_RELS: Final = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -45,28 +58,49 @@ CORE_PROPERTIES: Final = b"""<?xml version="1.0" encoding="UTF-8" standalone="ye
 </cp:coreProperties>
 """
 
-APP_PROPERTIES: Final = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
-<Slides>1</Slides>
-</Properties>
-"""
 
-PRESENTATION: Final = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+def app_properties(slide_count: int) -> bytes:
+    """Extended properties: just the actual slide count."""
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+<Slides>{slide_count}</Slides>
+</Properties>
+""".encode("ascii")
+
+
+def presentation(slide_count: int) -> bytes:
+    """Presentation XML: one ``p:sldId`` per slide, in order."""
+    slide_ids = "".join(
+        f'<p:sldId id="{255 + index}" r:id="rId{1 + index}"/>'
+        for index in range(1, slide_count + 1)
+    )
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
 <p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst>
-<p:sldIdLst><p:sldId id="256" r:id="rId2"/></p:sldIdLst>
+<p:sldIdLst>{slide_ids}</p:sldIdLst>
 <p:sldSz cx="{PPTX_SLIDE_WIDTH}" cy="{PPTX_SLIDE_HEIGHT}"/>
 <p:notesSz cx="{PPTX_SLIDE_HEIGHT}" cy="{PPTX_SLIDE_WIDTH}"/>
 </p:presentation>
 """.encode("ascii")
 
-PRESENTATION_RELS: Final = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+
+def presentation_rels(slide_count: int) -> bytes:
+    """Presentation relationships: slide master, one relationship per slide, theme."""
+    slide_relationships = "".join(
+        f'<Relationship Id="rId{1 + index}" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" '
+        f'Target="slides/slide{index}.xml"/>'
+        for index in range(1, slide_count + 1)
+    )
+    theme_id = 2 + slide_count
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
-<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
-<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>
+{slide_relationships}
+<Relationship Id="rId{theme_id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>
 </Relationships>
-"""
+""".encode("ascii")
+
 
 SLIDE_MASTER: Final = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
@@ -148,17 +182,20 @@ THEME: Final = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </a:theme>
 """
 
-SLIDE_RELS: Final = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+
+def slide_rels(index: int) -> bytes:
+    """One slide's relationships: its layout, its OLE object, its fallback image."""
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
-<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="../embeddings/oleObject1.bin"/>
-<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="../embeddings/oleObject{index}.bin"/>
+<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image{index}.png"/>
 </Relationships>
-"""
+""".encode("ascii")
 
 
-def slide_xml(x: int, y: int, cx: int, cy: int) -> bytes:
-    """Render the one slide's XML: a single OLE-object graphic frame."""
+def slide_xml(index: int, x: int, y: int, cx: int, cy: int) -> bytes:
+    """Render one slide's XML: a single OLE-object graphic frame."""
     return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
 <p:cSld>
@@ -167,14 +204,14 @@ def slide_xml(x: int, y: int, cx: int, cy: int) -> bytes:
 <p:grpSpPr/>
 <p:graphicFrame>
 <p:nvGraphicFramePr>
-<p:cNvPr id="2" name="Figure"/>
+<p:cNvPr id="2" name="Figure {index}"/>
 <p:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></p:cNvGraphicFramePr>
 <p:nvPr/>
 </p:nvGraphicFramePr>
 <p:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{cx}" cy="{cy}"/></p:xfrm>
 <a:graphic>
 <a:graphicData uri="http://schemas.openxmlformats.org/presentationml/2006/ole">
-<p:oleObj name="Figure" r:id="rId2" imgW="{cx}" imgH="{cy}" progId="Package">
+<p:oleObj name="Figure {index}" r:id="rId2" imgW="{cx}" imgH="{cy}" progId="Package">
 <p:pic>
 <p:nvPicPr><p:cNvPr id="0" name=""/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
 <p:blipFill><a:blip r:embed="rId3"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
