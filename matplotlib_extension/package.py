@@ -462,10 +462,41 @@ def _line_spec(line: Line2D, arrays: _ArrayStore) -> dict[str, Any]:
 
 
 def _allowed_colormap_name(cmap: Any) -> str | None:
+    # Matching by name alone would let a custom Colormap that merely claims an
+    # allowlisted name (e.g. ListedColormap(..., name="viridis")) silently
+    # replace itself with the real built-in on restore. Verify the live
+    # object's actual color mapping (and special colors) against the
+    # registered built-in before trusting its name.
     name = getattr(cmap, "name", None)
-    if isinstance(name, str) and name in _COLORMAP_NAMES:
-        return name
-    return None
+    if not isinstance(name, str) or name not in _COLORMAP_NAMES:
+        return None
+    try:
+        registered = matplotlib.colormaps[name]
+    except KeyError:
+        return None
+    if type(cmap) is not type(registered):
+        return None
+    sample = np.linspace(0.0, 1.0, 256)
+    if not np.array_equal(cmap(sample), registered(sample)):
+        return None
+    if not np.array_equal(cmap.get_bad(), registered.get_bad()):
+        return None
+    if not np.array_equal(cmap.get_under(), registered.get_under()):
+        return None
+    if not np.array_equal(cmap.get_over(), registered.get_over()):
+        return None
+    return name
+
+
+def _is_scalar_alpha(value: object) -> bool:
+    return value is None or (
+        isinstance(value, int | float | np.integer | np.floating)
+        and not isinstance(value, bool)
+    )
+
+
+def _has_masked_values(*values: object) -> bool:
+    return any(np.ma.is_masked(value) for value in values)
 
 
 def _effective_norm_range(
@@ -504,13 +535,24 @@ def _match_marker_symbol(path: Any) -> str | int | None:
 
 
 def _scatter_spec(
-    collection: PathCollection, arrays: _ArrayStore
+    collection: PathCollection, arrays: _ArrayStore, ax: matplotlib.axes.Axes
 ) -> dict[str, Any] | None:
+    # A non-data offset transform (e.g. transform=ax.transAxes) would be
+    # restored as data-space offsets, moving the points whenever the axes
+    # limits aren't the unit square.
+    if collection.get_offset_transform() is not ax.transData:
+        return None
+    alpha = collection.get_alpha()
+    if not _is_scalar_alpha(alpha):
+        return None
     paths = collection.get_paths()
     if len(paths) != 1:
         return None
     marker = _match_marker_symbol(paths[0])
     if marker is None:
+        return None
+    offsets = collection.get_offsets()
+    if _has_masked_values(offsets):
         return None
     # Resolve lazily-mapped face/edge colors (e.g. a colormapped "face" edgecolor)
     # without requiring a prior canvas draw.
@@ -523,6 +565,8 @@ def _scatter_spec(
             "mode": "explicit",
         }
     else:
+        if _has_masked_values(values):
+            return None
         cmap_name = _allowed_colormap_name(collection.get_cmap())
         norm = collection.norm
         if cmap_name is None or type(norm) is not colors.Normalize:
@@ -538,20 +582,30 @@ def _scatter_spec(
             "vmin": norm_range[0],
         }
     return {
-        "alpha": collection.get_alpha(),
+        "alpha": None if alpha is None else float(alpha),
         "color": color_spec,
         "edgecolor": arrays.add(np.ma.getdata(collection.get_edgecolor())),
         "label": str(collection.get_label()),
         "linewidths": arrays.add(np.ma.getdata(collection.get_linewidth())),
         "marker": marker,
-        "offsets": arrays.add(np.ma.getdata(collection.get_offsets())),
+        "offsets": arrays.add(np.ma.getdata(offsets)),
         "sizes": arrays.add(np.ma.getdata(collection.get_sizes())),
         "visible": bool(collection.get_visible()),
         "zorder": float(collection.get_zorder()),
     }
 
 
-def _image_spec(image: AxesImage, arrays: _ArrayStore) -> dict[str, Any] | None:
+def _image_spec(
+    image: AxesImage, arrays: _ArrayStore, ax: matplotlib.axes.Axes
+) -> dict[str, Any] | None:
+    # A transform that doesn't include the axes' data transform (e.g.
+    # transform=ax.transAxes) would be restored as a data-space extent,
+    # moving and resizing the image whenever the axes limits change.
+    if not image.get_transform().contains_branch(ax.transData):
+        return None
+    alpha = image.get_alpha()
+    if not _is_scalar_alpha(alpha):
+        return None
     interpolation = image.get_interpolation()
     if interpolation not in _INTERPOLATION_NAMES:
         return None
@@ -560,6 +614,8 @@ def _image_spec(image: AxesImage, arrays: _ArrayStore) -> dict[str, Any] | None:
         return None
     data = image.get_array()
     if data is None:
+        return None
+    if _has_masked_values(data):
         return None
     raw = np.ma.getdata(data)
     color_spec: dict[str, Any]
@@ -582,7 +638,7 @@ def _image_spec(image: AxesImage, arrays: _ArrayStore) -> dict[str, Any] | None:
     else:
         return None
     return {
-        "alpha": image.get_alpha(),
+        "alpha": None if alpha is None else float(alpha),
         "color": color_spec,
         "data": arrays.add(raw),
         "extent": [
@@ -726,6 +782,7 @@ def _axes_spec(
     ax: matplotlib.axes.Axes, arrays: _ArrayStore, collected: list[str]
 ) -> dict[str, Any]:
     lines: list[dict[str, Any]] = []
+    line_identity_to_index: dict[int, int] = {}
     for line in ax.lines:
         if type(line) is not Line2D:
             _warn(f"Skipped unsupported line class {type(line).__name__}", collected)
@@ -734,6 +791,8 @@ def _axes_spec(
             lines.append(_line_spec(line, arrays))
         except (PackageError, TypeError, ValueError) as exc:
             _warn(f"Skipped Line2D: {exc}", collected)
+            continue
+        line_identity_to_index[id(line)] = len(lines) - 1
 
     texts: list[dict[str, Any]] = []
     for text in ax.texts:
@@ -754,6 +813,7 @@ def _axes_spec(
 
     recovery: list[dict[str, Any]] = []
     collections: list[dict[str, Any]] = []
+    collection_identity_to_index: dict[int, int] = {}
     for collection in ax.collections:
         if type(collection) is not PathCollection:
             _warn(
@@ -762,12 +822,13 @@ def _axes_spec(
             )
             continue
         try:
-            scatter_spec = _scatter_spec(collection, arrays)
+            scatter_spec = _scatter_spec(collection, arrays, ax)
         except (PackageError, TypeError, ValueError) as exc:
             _warn(f"Skipped PathCollection: {exc}", collected)
             continue
         if scatter_spec is not None:
             collections.append(scatter_spec)
+            collection_identity_to_index[id(collection)] = len(collections) - 1
             continue
         try:
             values = collection.get_array()
@@ -795,7 +856,7 @@ def _axes_spec(
             _warn(f"Skipped unsupported image class {type(image).__name__}", collected)
             continue
         try:
-            image_spec = _image_spec(image, arrays)
+            image_spec = _image_spec(image, arrays, ax)
         except (PackageError, TypeError, ValueError) as exc:
             _warn(f"Skipped AxesImage: {exc}", collected)
             continue
@@ -847,13 +908,41 @@ def _axes_spec(
         ):
             _warn("Skipped legend with an unsupported location", collected)
         else:
-            legend_spec = {
-                "frameon": bool(legend.get_frame_on()),
-                "labels": [item.get_text() for item in legend.get_texts()],
-                "loc": loc,
-                "title": legend.get_title().get_text(),
-                "visible": bool(legend.get_visible()),
-            }
+            legend_texts = legend.get_texts()
+            handles, _ = ax.get_legend_handles_labels()
+            entries: list[dict[str, Any]] = []
+            for handle in handles:
+                if type(handle) is Line2D and id(handle) in line_identity_to_index:
+                    entries.append(
+                        {"index": line_identity_to_index[id(handle)], "type": "line"}
+                    )
+                elif (
+                    type(handle) is PathCollection
+                    and id(handle) in collection_identity_to_index
+                ):
+                    entries.append(
+                        {
+                            "index": collection_identity_to_index[id(handle)],
+                            "type": "collection",
+                        }
+                    )
+                else:
+                    break
+            if len(entries) != len(legend_texts):
+                _warn(
+                    "Skipped legend referencing an artist that could not be "
+                    "exactly restored",
+                    collected,
+                )
+            else:
+                legend_spec = {
+                    "entries": entries,
+                    "frameon": bool(legend.get_frame_on()),
+                    "labels": [item.get_text() for item in legend_texts],
+                    "loc": loc,
+                    "title": legend.get_title().get_text(),
+                    "visible": bool(legend.get_visible()),
+                }
 
     aspect = ax.get_aspect()
     if not isinstance(aspect, str | int | float) or isinstance(aspect, bool):
@@ -1524,7 +1613,18 @@ def _restore_axes(figure: Figure, spec: object, files: Mapping[str, bytes]) -> N
     if legend_value is not None:
         legend_spec = _mapping(legend_value, "legend")
         labels = _string_list(legend_spec, "labels", max_items=MAX_ARTISTS_PER_AXES)
-        handles = ax.lines[: len(labels)]
+        entries = _sequence(legend_spec.get("entries"), "entries", length=len(labels))
+        handles: list[Any] = []
+        for entry_value in entries:
+            entry = _mapping(entry_value, "legend entry")
+            kind = _enum(entry, "type", {"line", "collection"})
+            index = entry.get("index")
+            if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+                raise PackageError("Invalid legend entry index")
+            source = ax.lines if kind == "line" else ax.collections
+            if index >= len(source):
+                raise PackageError("Legend entry index is out of range")
+            handles.append(source[index])
         loc = legend_spec.get("loc")
         if (
             not isinstance(loc, str | int)

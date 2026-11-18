@@ -499,3 +499,136 @@ def test_cross_version_scatter_imshow_fixture_restores_exactly(
     assert image.origin == "lower"
     assert image.get_interpolation() == "nearest"
     plt.close(restored)
+
+
+def test_scatter_with_impersonating_colormap_remains_recoverable(
+    tmp_path: Path,
+) -> None:
+    fig, ax = plt.subplots()
+    fake_viridis = ListedColormap(["red", "blue"], name="viridis")
+    ax.scatter([1.0, 2.0], [3.0, 4.0], c=[7.0, 8.0], cmap=fake_viridis, label="fake")
+    path = tmp_path / "scatter.mpl.png"
+
+    with pytest.warns(UnsupportedFigureWarning, match="Stored raw numeric data"):
+        savefig(fig, path)
+
+    records = recover_data(path)
+    assert len(records) == 1
+    plt.close(fig)
+
+
+def test_scatter_with_non_data_transform_remains_recoverable(tmp_path: Path) -> None:
+    fig, ax = plt.subplots()
+    ax.scatter([0.1, 0.2], [0.3, 0.4], transform=ax.transAxes, label="axes-space")
+    path = tmp_path / "scatter.mpl.png"
+
+    with pytest.warns(UnsupportedFigureWarning, match="Stored raw numeric data"):
+        savefig(fig, path)
+
+    records = recover_data(path)
+    assert len(records) == 1
+    plt.close(fig)
+
+
+def test_imshow_with_non_data_transform_remains_recoverable(tmp_path: Path) -> None:
+    fig, ax = plt.subplots()
+    ax.imshow([[1.0, 2.0], [3.0, 4.0]], transform=ax.transAxes, label="axes-space")
+    path = tmp_path / "image.mpl.png"
+
+    with pytest.warns(UnsupportedFigureWarning, match="Stored raw numeric data"):
+        savefig(fig, path)
+
+    records = recover_data(path)
+    assert len(records) == 1
+    plt.close(fig)
+
+
+def test_scatter_with_masked_offsets_remains_recoverable(tmp_path: Path) -> None:
+    fig, ax = plt.subplots()
+    x = np.ma.array([1.0, 2.0, 3.0], mask=[False, True, False])
+    ax.scatter(x, [4.0, 5.0, 6.0], label="masked")
+    path = tmp_path / "scatter.mpl.png"
+
+    with pytest.warns(UnsupportedFigureWarning, match="Stored raw numeric data"):
+        savefig(fig, path)
+
+    records = recover_data(path)
+    assert len(records) == 1
+    plt.close(fig)
+
+
+def test_imshow_with_masked_data_remains_recoverable(tmp_path: Path) -> None:
+    fig, ax = plt.subplots()
+    data = np.ma.array([[1.0, 2.0], [3.0, 4.0]], mask=[[False, True], [False, False]])
+    ax.imshow(data, label="masked")
+    path = tmp_path / "image.mpl.png"
+
+    with pytest.warns(UnsupportedFigureWarning, match="Stored raw numeric data"):
+        savefig(fig, path)
+
+    records = recover_data(path)
+    assert len(records) == 1
+    plt.close(fig)
+
+
+def test_scatter_with_array_alpha_remains_recoverable(tmp_path: Path) -> None:
+    fig, ax = plt.subplots()
+    ax.scatter([1.0, 2.0], [3.0, 4.0], alpha=[0.2, 0.8], label="varied-alpha")
+    path = tmp_path / "scatter.mpl.png"
+
+    with pytest.warns(UnsupportedFigureWarning, match="Stored raw numeric data"):
+        savefig(fig, path)
+
+    records = recover_data(path)
+    assert len(records) == 1
+    plt.close(fig)
+
+
+def test_imshow_with_array_alpha_remains_recoverable(tmp_path: Path) -> None:
+    fig, ax = plt.subplots()
+    data = np.array([[1.0, 2.0], [3.0, 4.0]])
+    ax.imshow(data, alpha=np.array([[0.1, 0.2], [0.3, 0.4]]), label="varied-alpha")
+    path = tmp_path / "image.mpl.png"
+
+    with pytest.warns(UnsupportedFigureWarning, match="Stored raw numeric data"):
+        savefig(fig, path)
+
+    records = recover_data(path)
+    assert len(records) == 1
+    plt.close(fig)
+
+
+def test_legend_with_scatter_handle_round_trips_exactly() -> None:
+    fig, ax = plt.subplots()
+    ax.plot([0.0, 1.0], [0.0, 1.0], label="line")
+    ax.scatter([0.0, 1.0], [1.0, 0.0], label="points")
+    ax.legend()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnsupportedFigureWarning)
+        payload = dump_package(fig)
+
+    assert inspect_package(payload)["warnings"] == []
+    restored = load_package(payload)
+    legend = restored.axes[0].get_legend()
+    assert legend is not None
+    assert [text.get_text() for text in legend.get_texts()] == ["line", "points"]
+    plt.close(fig)
+    plt.close(restored)
+
+
+def test_legend_referencing_unrestorable_scatter_is_skipped() -> None:
+    fig, ax = plt.subplots()
+    ax.scatter([0.0, 1.0], [1.0, 0.0], marker=(5, 1, 20), label="poly")
+    ax.legend()
+
+    with pytest.warns(
+        UnsupportedFigureWarning,
+        match="Skipped legend referencing an artist",
+    ):
+        payload = dump_package(fig)
+
+    restored = load_package(payload)
+    assert restored.axes[0].get_legend() is None
+    plt.close(fig)
+    plt.close(restored)
