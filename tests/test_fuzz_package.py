@@ -36,7 +36,9 @@ from matplotlib_extension.package import (
     recover_numeric_data,
 )
 from tests.fuzz_support import (
-    KNOWN_UNFIXED_LEAK_TYPES,
+    ARRAY_LOAD_LEAK_TYPES,
+    ARTIST_RESTORE_LEAK_TYPES,
+    ZIP_STRUCTURE_LEAK_TYPES,
     resign_manifest,
     valid_package_files,
     write_package,
@@ -47,23 +49,36 @@ pytestmark = pytest.mark.fuzz
 _BASE_FILES = valid_package_files()
 _MEMBER_NAMES = sorted(_BASE_FILES)
 _ARRAY_NAME = next(name for name in _MEMBER_NAMES if name.startswith("arrays/"))
-_TOLERATED = (PackageError, *KNOWN_UNFIXED_LEAK_TYPES)
 
 
 def _exercise_all_entry_points(payload: bytes) -> None:
     """Call every read-only package entry point and require a clean result:
-    ``PackageError`` (or a narrow, already-tracked known gap -- see
-    ``KNOWN_UNFIXED_LEAK_TYPES``), or success (closing any restored Figure).
+    ``PackageError``, or success (closing any restored Figure) -- or, only on
+    the specific code path that can actually reach it, a narrow
+    already-tracked known gap (see ``ZIP_STRUCTURE_LEAK_TYPES``/
+    ``ARRAY_LOAD_LEAK_TYPES``/``ARTIST_RESTORE_LEAK_TYPES`` in
+    ``tests/fuzz_support.py``). Each entry point is held to the narrowest
+    tolerance it can legitimately need, so a new leak on a path that has no
+    known gap still fails loudly.
     """
-    for loader in (inspect_package, recover_numeric_data):
-        try:
-            loader(payload)
-        except _TOLERATED:
-            pass
+    try:
+        inspect_package(payload)
+    except (PackageError, *ZIP_STRUCTURE_LEAK_TYPES):
+        pass
+
+    try:
+        recover_numeric_data(payload)
+    except (PackageError, *ZIP_STRUCTURE_LEAK_TYPES, *ARRAY_LOAD_LEAK_TYPES):
+        pass
 
     try:
         figure = load_package(payload)
-    except _TOLERATED:
+    except (
+        PackageError,
+        *ZIP_STRUCTURE_LEAK_TYPES,
+        *ARRAY_LOAD_LEAK_TYPES,
+        *ARTIST_RESTORE_LEAK_TYPES,
+    ):
         return
     plt.close(figure)
 
@@ -162,23 +177,20 @@ def test_arbitrary_json_as_figure_json_never_crashes(spec: Any) -> None:
 
 @settings(max_examples=200, deadline=2000)
 @given(
-    axes=st.lists(_JSON_VALUES, max_size=5),
-    schema_version=st.one_of(
-        st.integers(min_value=-10, max_value=10), st.text(max_size=10)
-    ),
-    figure_field=_JSON_VALUES,
+    field=st.sampled_from(["schema_version", "axes", "figure"]),
+    value=_JSON_VALUES,
 )
-def test_fuzzed_figure_json_fields_never_crash(
-    axes: list[Any], schema_version: Any, figure_field: Any
-) -> None:
-    """Mutate the specific figure.json fields every reader branches on
-    first (``schema_version``, ``axes``, ``figure``) with adversarial
-    values, keeping the rest of a real package intact."""
+def test_fuzzed_figure_json_fields_never_crash(field: str, value: Any) -> None:
+    """Mutate exactly one of the specific figure.json fields every reader
+    branches on first (``schema_version``, ``axes``, ``figure``) with an
+    adversarial value, keeping every *other* field at its real, valid
+    value. Randomizing all three at once would almost always fail on
+    whichever field the reader compares first (typically
+    ``schema_version``), so the other two fields' own validation would
+    rarely be reached at all."""
     files = dict(_BASE_FILES)
     original = json.loads(files["figure.json"])
-    original["axes"] = axes
-    original["schema_version"] = schema_version
-    original["figure"] = figure_field
+    original[field] = value
     files["figure.json"] = (
         json.dumps(original, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         + "\n"
@@ -189,25 +201,22 @@ def test_fuzzed_figure_json_fields_never_crash(
 
 @settings(max_examples=150, deadline=2000)
 @given(
-    format_name=_JSON_VALUES,
-    format_version=_JSON_VALUES,
-    figure_schema_version=_JSON_VALUES,
-    files_field=_JSON_VALUES,
+    field=st.sampled_from(
+        ["format", "format_version", "figure_schema_version", "files"]
+    ),
+    value=_JSON_VALUES,
 )
-def test_fuzzed_manifest_fields_never_crash(
-    format_name: Any,
-    format_version: Any,
-    figure_schema_version: Any,
-    files_field: Any,
-) -> None:
-    """Mutate manifest.json's own schema-defining fields with adversarial
-    values (wrong types, missing structure) while figure.json stays valid."""
+def test_fuzzed_manifest_fields_never_crash(field: str, value: Any) -> None:
+    """Mutate exactly one of manifest.json's own schema-defining fields with
+    an adversarial value (wrong type, missing structure), keeping every
+    *other* manifest field -- and all of figure.json -- at its real, valid
+    value. Randomizing all four at once would almost always fail on
+    ``format`` (the very first comparison in ``_validated_files``), so the
+    version fields and the per-record integrity checks would rarely be
+    reached at all."""
     files = dict(_BASE_FILES)
     manifest = json.loads(files["manifest.json"])
-    manifest["format"] = format_name
-    manifest["format_version"] = format_version
-    manifest["figure_schema_version"] = figure_schema_version
-    manifest["files"] = files_field
+    manifest[field] = value
     files["manifest.json"] = (
         json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n"
     ).encode("utf-8")

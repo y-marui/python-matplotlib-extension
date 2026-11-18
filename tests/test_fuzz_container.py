@@ -1,10 +1,17 @@
 """Property-based (hypothesis) hardening tests for
 matplotlib_extension.container: the PNG/PDF/SVG/OLE container bindings.
 
-Same property as tests/test_fuzz_package.py: every entry point that touches
-untrusted bytes must either succeed or raise ``PackageError`` (or a narrow,
-already-tracked known gap -- see ``tests/fuzz_support.KNOWN_UNFIXED_LEAK_TYPES``),
-never an unrelated exception, a hang, or unbounded memory use.
+Unlike tests/test_fuzz_package.py, these entry points are held to
+``PackageError``-or-nothing with only one narrow, already-tracked exemption:
+``ZIP_STRUCTURE_LEAK_TYPES`` (see ``tests/fuzz_support.py``), since every
+extractor here validates its result through ``inspect_package`` before
+returning and so inherits that specific gap too. None of the *other* known
+gaps (artist restoration, array loading) live anywhere container.py's
+extractors touch, so widening tolerance beyond that one shared gap would
+just hide a real new leak in this module. A successful extraction must also
+itself be a validly usable package -- extracting "successfully" into
+something that gap-free validation rejects is itself a bug in the
+extractor, not a case to swallow.
 
 Budget: see the module docstring of tests/test_fuzz_package.py for the
 rationale behind the chosen ``max_examples``/``deadline`` values.
@@ -28,13 +35,11 @@ from matplotlib_extension.container import (
     extract_png,
     extract_svg,
 )
-from matplotlib_extension.package import PackageError
+from matplotlib_extension.package import PackageError, inspect_package
 from matplotlib_extension.pyplot import savefig
-from tests.fuzz_support import KNOWN_UNFIXED_LEAK_TYPES, simple_figure
+from tests.fuzz_support import ZIP_STRUCTURE_LEAK_TYPES, simple_figure
 
 pytestmark = pytest.mark.fuzz
-
-_TOLERATED = (PackageError, *KNOWN_UNFIXED_LEAK_TYPES)
 
 
 def _real_editable_files() -> dict[str, bytes]:
@@ -111,18 +116,34 @@ _MUTATION_KINDS = st.one_of(
 )
 
 
+def _check_ole_native_png(editable_png: bytes) -> None:
+    """``extract_ole_native_png`` returns an editable *PNG*, not a canonical
+    package, so its success claim must be checked by unwrapping that PNG
+    (which itself validates the package it embeds) rather than by handing
+    PNG bytes straight to ``inspect_package``."""
+    extract_png(editable_png)
+
+
+# What a *successful* return value from each extractor must satisfy -- the
+# extractor's own claim that the bytes it handed back are genuinely usable.
+_UNWRAP: dict[Any, Any] = {
+    extract_png: inspect_package,
+    extract_pdf: inspect_package,
+    extract_svg: inspect_package,
+    extract_ole_native_png: _check_ole_native_png,
+    extract_payload: inspect_package,
+}
+
+
 def _exercise(extractor: Any, data: bytes) -> None:
     try:
         payload = extractor(data)
-    except _TOLERATED:
+    except (PackageError, *ZIP_STRUCTURE_LEAK_TYPES):
         return
-    # A successful extraction must itself be a validly-inspectable package.
-    try:
-        from matplotlib_extension.package import inspect_package
-
-        inspect_package(payload)
-    except _TOLERATED:
-        pass
+    # A successful extraction must itself be genuinely valid: if the
+    # extractor's own success claim doesn't hold up, that's a bug in the
+    # extractor, not something to swallow.
+    _UNWRAP[extractor](payload)
 
 
 @settings(max_examples=250, deadline=1500)
@@ -171,17 +192,7 @@ def test_extract_payload_dispatch_never_crashes(prefix: bytes, tail: bytes) -> N
     """``extract_payload`` dispatches purely on signature bytes; a crafted
     prefix must route to the right extractor (or fail cleanly) regardless of
     what garbage follows it."""
-    data = prefix + tail
-    try:
-        payload = extract_payload(data)
-    except _TOLERATED:
-        return
-    from matplotlib_extension.package import inspect_package
-
-    try:
-        inspect_package(payload)
-    except _TOLERATED:
-        pass
+    _exercise(extract_payload, prefix + tail)
 
 
 @settings(max_examples=150, deadline=1500)

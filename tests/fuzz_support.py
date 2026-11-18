@@ -33,38 +33,73 @@ DOCUMENTED_EXCEPTIONS: tuple[type[BaseException], ...] = (PackageError,)
 # project's own range/type checks but is then handed to a raw NumPy or
 # Matplotlib constructor/setter with no surrounding try/except, so a
 # genuinely malformed package can make a reader raise a plain exception
-# instead of ``PackageError``:
+# instead of ``PackageError``.
 #
-# - an invalid ``linestyle``/``fontweight`` string reaching ``Line2D``/
-#   ``Text`` leaks a bare ``ValueError`` from Matplotlib;
-# - mismatched ``xdata``/``ydata`` array lengths leak a bare ``ValueError``
-#   (shape mismatch) or ``RuntimeError`` (a 0-d/scalar array is not
-#   "iterable") from Matplotlib's own validation during ``Axes.add_line``;
+# Grouped by the *specific* code path that can actually reach each one, not
+# applied blanket to every reader: an entry point that cannot reach a given
+# path must still be held to the strict "PackageError or nothing" contract,
+# so a genuinely new leak on *that* path is never silently excused by a gap
+# that only exists somewhere else.
+#
+# ``_load_array`` (raw ``numpy.load()`` parsing) is reachable from both
+# ``recover_numeric_data`` and ``load_package``:
 # - ``.npy`` array bytes that happen to start with the ZIP local-file-header
 #   magic (``PK\x03\x04``) make ``numpy.load`` attempt to open the stream as
 #   an ``.npz`` zip archive; a truncated/invalid one leaks a bare
 #   ``zipfile.BadZipFile``;
 # - a malformed (but not-quite-garbage) ``.npy`` header leaks a bare
 #   ``tokenize.TokenError`` from NumPy's own header-dict parser.
-#
-# None of these is a subclass of the ``(OSError, ValueError, EOFError)``
-# tuple ``_load_array`` catches around ``numpy.load()`` except the one
-# ValueError case, which instead comes from an entirely separate,
-# uncaught call site (``Axes.add_line`` via ``_restore_line``).
-#
-# The broad property tests in this file widen their accepted-exception set to
-# this tuple *in addition to* ``DOCUMENTED_EXCEPTIONS`` so they keep giving a
-# clean signal for genuinely new leaks (``KeyError``, ``TypeError``,
-# ``struct.error``, a hang, ...) without flaking on these already-known,
-# already-reported ones. ``tests/test_known_parser_gaps.py`` pins each one
-# down exactly via a `strict` `xfail`, so this list shrinks (and CI tells you
-# to shrink it) the moment any of them is actually fixed.
-KNOWN_UNFIXED_LEAK_TYPES: tuple[type[BaseException], ...] = (
-    ValueError,
-    RuntimeError,
+ARRAY_LOAD_LEAK_TYPES: tuple[type[BaseException], ...] = (
     zipfile.BadZipFile,
     tokenize.TokenError,
 )
+
+# ``_validated_files`` is the shared ZIP-structure validator behind every
+# reader (``inspect_package``, ``recover_numeric_data``, ``load_package``)
+# *and*, transitively via ``inspect_package``, every container.py extractor
+# (``extract_png``/``extract_pdf``/``extract_svg``/``extract_ole_native_png``
+# all call it before returning "successfully"). It wraps only the
+# ``zipfile.ZipFile(...)`` *constructor* call in
+# ``try/except zipfile.BadZipFile``. zipfile performs a second, *lazy*
+# consistency check -- comparing each entry's local file header against its
+# central directory record -- only when that entry is actually read
+# (``archive.read(name)``/``archive.open(name)``), which happens later in
+# the same function, outside that try/except. A ZIP whose central directory
+# parses fine but whose local headers disagree with it (e.g. a corrupted
+# filename-length field, or overlapping entries) is therefore only caught at
+# read time, and leaks a bare ``zipfile.BadZipFile`` ("File name in
+# directory ... and header ... differ", "Overlapped entries ... possible zip
+# bomb") from *every* one of those entry points instead of ``PackageError``.
+ZIP_STRUCTURE_LEAK_TYPES: tuple[type[BaseException], ...] = (zipfile.BadZipFile,)
+
+# ``Line2D``/``Text`` artist restoration (``_restore_line``/
+# ``_apply_text_spec``, via ``_restore_axes``) is reachable only from
+# ``load_package`` -- ``recover_numeric_data`` never restores artists, and
+# ``inspect_package`` never even reads ``figure.json``:
+# - an invalid ``linestyle``/``fontweight`` string reaching ``Line2D``/
+#   ``Text`` leaks a bare ``ValueError`` from Matplotlib;
+# - mismatched ``xdata``/``ydata`` array lengths leak a bare ``ValueError``
+#   (shape mismatch) or ``RuntimeError`` (a 0-d/scalar array is not
+#   "iterable") from Matplotlib's own validation during ``Axes.add_line``.
+ARTIST_RESTORE_LEAK_TYPES: tuple[type[BaseException], ...] = (
+    ValueError,
+    RuntimeError,
+)
+
+# None of the above is a subclass of the ``(OSError, ValueError, EOFError)``
+# tuple ``_load_array`` catches around ``numpy.load()`` except the one
+# ValueError case, which instead comes from an entirely separate, uncaught
+# call site (``Axes.add_line`` via ``_restore_line``).
+#
+# The broad property tests in tests/test_fuzz_package.py widen their
+# accepted-exception set to exactly the subset above that each specific
+# entry point can reach, *in addition to* ``DOCUMENTED_EXCEPTIONS``, so they
+# keep giving a clean signal for genuinely new leaks (``KeyError``,
+# ``TypeError``, ``struct.error``, a hang, ...) without flaking on these
+# already-known, already-reported ones. ``tests/test_known_parser_gaps.py``
+# pins each one down exactly via a `strict` `xfail`, so narrowing either
+# tuple above (and deleting the corresponding `xfail`) is how a real fix
+# gets reflected here.
 
 
 def simple_figure() -> Figure:
@@ -178,4 +213,29 @@ def inflate_declared_entry_size(
         cd_offset += 4
     if not found:
         raise AssertionError(f"central directory record for {member!r} not found")
+    return bytes(data)
+
+
+def widen_local_header_filename_length(
+    payload: bytes, member: str, extra_bytes: int
+) -> bytes:
+    """Widen *member*'s LOCAL file header filename-length field by
+    *extra_bytes*, without touching the matching central directory record or
+    any actual file content.
+
+    This reproduces ``ZIP_STRUCTURE_LEAK_TYPES`` deterministically: the
+    local header's filename field (now longer than the real name) no longer
+    matches the central directory's recorded filename, which zipfile only
+    notices lazily -- when the entry is actually read -- raising a bare
+    ``zipfile.BadZipFile`` ("File name in directory ... and header ...
+    differ") instead of the project's own ``PackageError``.
+    """
+    data = bytearray(payload)
+    with zipfile.ZipFile(BytesIO(payload)) as archive:
+        info = archive.getinfo(member)
+        local_offset = info.header_offset
+
+    # Local file header: filename_len at +26 (2 bytes, little-endian).
+    filename_len = struct.unpack_from("<H", data, local_offset + 26)[0]
+    struct.pack_into("<H", data, local_offset + 26, filename_len + extra_bytes)
     return bytes(data)

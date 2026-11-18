@@ -4,10 +4,23 @@ container.py), does not fix.
 
 Each is marked ``xfail(strict=True)``: if one of these ever starts raising
 ``PackageError`` instead of leaking a raw exception, this file turns into a
-hard failure telling you to narrow ``KNOWN_UNFIXED_LEAK_TYPES`` in
-``tests/fuzz_support.py`` and delete the corresponding ``xfail`` -- so a real
-fix can't silently stay unnoticed by the fuzz suite. See the PR description
-for the full writeup of each gap and a suggested follow-up issue.
+hard failure telling you to narrow ``ARRAY_LOAD_LEAK_TYPES``/
+``ARTIST_RESTORE_LEAK_TYPES`` in ``tests/fuzz_support.py`` and delete the
+corresponding ``xfail`` -- so a real fix can't silently stay unnoticed by the
+fuzz suite.
+
+The ``xfail(raises=...)`` decorator alone is not enough for that: every one
+of these gaps' "fixed" form is ``PackageError``, which is itself a
+``ValueError`` subclass, so a fix that raises ``PackageError`` would still
+satisfy e.g. ``raises=ValueError`` and the test would keep reporting a quiet
+XFAIL forever. Each test body therefore explicitly catches ``PackageError``
+first and calls ``pytest.fail`` (an exception the ``raises=`` decorator does
+not match, so it is reported as a genuine failure regardless of
+``strict``) -- only a *different* exception type is left to propagate out
+and satisfy the decorator's ``raises=``.
+
+See the PR description for the full writeup of each gap and a suggested
+follow-up issue.
 """
 
 from __future__ import annotations
@@ -20,14 +33,31 @@ import zipfile
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
+from matplotlib.figure import Figure
 
-from matplotlib_extension.package import load_package
+from matplotlib_extension.package import PackageError, inspect_package, load_package
 from tests.fuzz_support import (
     patch_figure_json,
     resign_manifest,
     valid_package_files,
+    widen_local_header_filename_length,
     write_package,
 )
+
+
+def _load_unless_fixed(payload: bytes) -> Figure:
+    """Call ``load_package``, but fail loudly -- bypassing ``xfail`` --
+    if the gap under test has actually been fixed to raise ``PackageError``.
+    See this module's docstring for why ``xfail(raises=...)`` alone can't
+    detect that (``PackageError`` is itself a ``ValueError`` subclass)."""
+    try:
+        return load_package(payload)
+    except PackageError:
+        pytest.fail(
+            "this gap appears fixed: load_package now raises PackageError. "
+            "Narrow ARRAY_LOAD_LEAK_TYPES/ARTIST_RESTORE_LEAK_TYPES in "
+            "tests/fuzz_support.py and delete this xfail."
+        )
 
 
 @pytest.mark.xfail(
@@ -50,7 +80,7 @@ def test_invalid_linestyle_leaks_plain_valueerror() -> None:
             "linestyle", "not-a-real-linestyle"
         ),
     )
-    figure = load_package(write_package(files))
+    figure = _load_unless_fixed(write_package(files))
     plt.close(figure)
 
 
@@ -73,7 +103,7 @@ def test_invalid_fontweight_leaks_plain_valueerror() -> None:
             "fontweight", "not-a-real-weight"
         ),
     )
-    figure = load_package(write_package(files))
+    figure = _load_unless_fixed(write_package(files))
     plt.close(figure)
 
 
@@ -112,7 +142,7 @@ def test_mismatched_xdata_ydata_length_leaks_plain_valueerror() -> None:
     files[xdata_path] = empty_array.getvalue()
     resign_manifest(files)
 
-    figure = load_package(write_package(files))
+    figure = _load_unless_fixed(write_package(files))
     plt.close(figure)
 
 
@@ -135,7 +165,7 @@ def test_npy_bytes_shaped_like_a_zip_leak_plain_badzipfile() -> None:
     files[array_name] = b"PK\x03\x04"
     resign_manifest(files)
 
-    figure = load_package(write_package(files))
+    figure = _load_unless_fixed(write_package(files))
     plt.close(figure)
 
 
@@ -172,8 +202,41 @@ def test_scalar_xdata_leaks_plain_runtimeerror() -> None:
     files[xdata_path] = scalar_array.getvalue()
     resign_manifest(files)
 
-    figure = load_package(write_package(files))
+    figure = _load_unless_fixed(write_package(files))
     plt.close(figure)
+
+
+@pytest.mark.xfail(
+    raises=zipfile.BadZipFile,
+    strict=True,
+    reason=(
+        "_validated_files (package.py) -- the shared ZIP-structure "
+        "validator behind every reader, and transitively every "
+        "container.py extractor -- only wraps the zipfile.ZipFile(...) "
+        "constructor call in try/except zipfile.BadZipFile. zipfile's own "
+        "lazy consistency check (comparing a local file header against its "
+        "central directory record) only runs when the entry is actually "
+        "read, a few lines later and outside that try/except, so a ZIP "
+        "whose central directory parses fine but disagrees with a local "
+        "header leaks a bare zipfile.BadZipFile ('File name in directory "
+        "... and header ... differ') instead of PackageError. This is the "
+        "broadest of the gaps this suite found: it is reachable from "
+        "inspect_package directly, not only from load_package."
+    ),
+)
+def test_mismatched_local_header_filename_leaks_plain_badzipfile() -> None:
+    files = valid_package_files()
+    payload = widen_local_header_filename_length(
+        write_package(files), "manifest.json", extra_bytes=16
+    )
+    try:
+        inspect_package(payload)
+    except PackageError:
+        pytest.fail(
+            "this gap appears fixed: inspect_package now raises "
+            "PackageError. Narrow ZIP_STRUCTURE_LEAK_TYPES in "
+            "tests/fuzz_support.py and delete this xfail."
+        )
 
 
 def _build_npy_with_raw_header(header_text: str) -> bytes:
@@ -213,5 +276,5 @@ def test_syntactically_broken_npy_header_leaks_tokenerror() -> None:
     )
     resign_manifest(files)
 
-    figure = load_package(write_package(files))
+    figure = _load_unless_fixed(write_package(files))
     plt.close(figure)
