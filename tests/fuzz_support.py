@@ -62,15 +62,39 @@ ARRAY_LOAD_LEAK_TYPES: tuple[type[BaseException], ...] = (
 # ``zipfile.ZipFile(...)`` *constructor* call in
 # ``try/except zipfile.BadZipFile``. zipfile performs a second, *lazy*
 # consistency check -- comparing each entry's local file header against its
-# central directory record -- only when that entry is actually read
-# (``archive.read(name)``/``archive.open(name)``), which happens later in
-# the same function, outside that try/except. A ZIP whose central directory
-# parses fine but whose local headers disagree with it (e.g. a corrupted
-# filename-length field, or overlapping entries) is therefore only caught at
-# read time, and leaks a bare ``zipfile.BadZipFile`` ("File name in
-# directory ... and header ... differ", "Overlapped entries ... possible zip
-# bomb") from *every* one of those entry points instead of ``PackageError``.
-ZIP_STRUCTURE_LEAK_TYPES: tuple[type[BaseException], ...] = (zipfile.BadZipFile,)
+# central directory record, and re-seeking within the underlying buffer --
+# only when that entry is actually read (``archive.read(name)``/
+# ``archive.open(name)``), which happens later in the same function, outside
+# that try/except. A ZIP whose central directory parses fine but is
+# internally inconsistent with the real bytes (e.g. a corrupted
+# filename-length field, overlapping entries, or a local header offset that
+# no longer lines up after a byte deletion/insertion elsewhere in the file)
+# is therefore only caught at read time, and -- depending on exactly which
+# internal zipfile check trips -- leaks either a bare ``zipfile.BadZipFile``
+# ("File name in directory ... and header ... differ", "Overlapped entries
+# ... possible zip bomb") or a bare ``ValueError`` ("negative seek value ...",
+# from zipfile's own ``_SharedFile.read``) instead of ``PackageError``, from
+# *every* one of those entry points. The ``ValueError`` shape was found by
+# fuzzing (a byte-deletion mutation of a real SVG's embedded package) and has
+# no committed deterministic fixture -- reproducing the exact internal seek
+# arithmetic by hand is fragile -- but is the same root cause and call site
+# as the ``BadZipFile`` shape pinned in
+# ``test_mismatched_local_header_filename_leaks_plain_badzipfile``.
+#
+# Tolerating a bare ``ValueError`` here is deliberately scoped to this one
+# gap, not a general "any ValueError" exemption: every other function on
+# inspect_package's/recover_numeric_data's call graph
+# (``_read_json``/``_validated_files``/``_mapping``/``_sequence``/``_enum``/
+# ``_number``/... and ``_load_array``'s own numpy.load() wrapping) already
+# converts its own failures to ``PackageError`` explicitly, so the only
+# remaining source of a bare ``ValueError`` on those two entry points is this
+# shared zipfile call site. (``load_package`` already tolerates bare
+# ``ValueError`` more broadly via ``ARTIST_RESTORE_LEAK_TYPES``, for the
+# unrelated artist-restoration gap below.)
+ZIP_STRUCTURE_LEAK_TYPES: tuple[type[BaseException], ...] = (
+    zipfile.BadZipFile,
+    ValueError,
+)
 
 # ``Line2D``/``Text`` artist restoration (``_restore_line``/
 # ``_apply_text_spec``, via ``_restore_axes``) is reachable only from
