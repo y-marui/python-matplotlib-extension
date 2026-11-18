@@ -59,8 +59,9 @@ Every binding stores the exact canonical package bytes:
 - SVG: base64 in `mplex:package` metadata under the namespace `https://github.com/y-marui/python-matplotlib-extension`.
 - OLE: a generic Package CFB object with one `\x01Ole10Native` stream whose native file is a normal PNG named `figure.mpl.png`; that PNG contains the exact canonical package bytes in its `mpFg` chunk.
 - MPLPKG: the canonical ZIP bytes without an outer container.
+- PPTX: not a direct binding of the canonical bytes; a minimal, portable OOXML presentation that carries the OLE binding above as an embedded object. See [Portable PPTX Generation](#portable-pptx-generation).
 
-`loadfig()` detects the binding from file signatures and extracts the package before running the same validation and restore path.
+`loadfig()` detects the binding from file signatures and extracts the package before running the same validation and restore path. PPTX is excluded from this detection; see [Portable PPTX Generation](#portable-pptx-generation).
 
 Editable graphics use `.mpl.png`, `.mpl.pdf`, and `.mpl.svg` compound suffixes so users can distinguish them from ordinary graphics by filename. `extract_editable_png(source, destination)` validates and copies an editable PNG source, or unwraps and validates the native editable PNG from an OLE/CFB source. Its destination must end in `.mpl.png`; it accepts no other output format, and its default exclusive-create mode prevents an accidentally selected object from overwriting an existing PNG.
 
@@ -73,6 +74,23 @@ For Windows presentation workflows, the OLE Package native file is `figure.mpl.p
 On macOS, where a Windows OLE verb cannot be the extraction contract, a presentation bridge may use the explicitly selected OLE Shape plus a temporary compressed copy of the current PPTX to resolve that Shape's OOXML relationship, read its internal CFB object, and save only the native `figure.mpl.png`. Shape-to-OOXML identifier mapping is an interoperability boundary and requires fixtures from supported PowerPoint versions; it must never fall back to guessing among multiple OLE objects. The bridge is not part of canonical parsing and does not inspect or restore the Figure package.
 
 PPTX package generation and embedding of the OLE bytes are portable OOXML operations and must not require Windows COM, PowerPoint, or OLE activation. Generated packages may be created on macOS, Linux, or Windows. Activation and user-selected export behavior remain platform-specific interoperability surfaces. Extraction bridges positively allowlist the selected Shape type, OOXML relationship/content type and normalized target, CFB stream layout, native filename, and editable PNG binding; all unknown or ambiguous structures fail closed.
+
+### Portable PPTX Generation
+
+`savefig(fig, "figure.pptx")` (or any destination whose format resolves to `pptx`) builds a minimal, valid `.pptx` package using only the standard library's `zipfile` and `xml`-compatible string templates; it never requires Windows COM, PowerPoint, or OLE activation, so it runs the same way on macOS, Linux, and Windows. PPTX is an editable-only format like OLE and MPLPKG: it requires `editable=True` (the default) and does not require the `.mpl.*` compound suffix, because — like the OLE binding — it is a passive presentation container rather than one of the directly editable graphics.
+
+The generated package positively allowlists its own structure to exactly:
+
+- one slide (`ppt/slides/slide1.xml`) containing exactly one shape: a `p:graphicFrame` whose `a:graphicData` uses the `.../presentationml/2006/ole` URI and holds exactly one `p:oleObj` element with `progId="Package"`;
+- exactly one OLE relationship (`.../relationships/oleObject`) and its target, pointing at the single embeddings part `ppt/embeddings/oleObject1.bin`, which holds the exact CFB bytes produced by `embed_ole()`;
+- exactly one `Default Extension="bin"` content type (`application/vnd.openxmlformats-officedocument.oleObject`) for that embeddings part;
+- one rendered fallback image (`ppt/media/image1.png`), referenced by the shape's `p:pic`/`a:blip`, so PowerPoint displays the figure before the OLE object is activated. This fallback is the same editable PNG bytes passed to `embed_ole()` (the normal PNG rendering with its `mpFg` chunk), not a separately rendered copy, since an editable PNG is already a normal, displayable PNG.
+
+The remaining parts (`[Content_Types].xml`, `_rels/.rels`, `docProps/core.xml`, `docProps/app.xml`, `ppt/presentation.xml` and its relationships, one slide master, one slide layout, one theme) are the fixed, schema-required OOXML scaffolding for a single-slide deck and carry no figure-specific content. The slide's graphic frame is sized from the embedded PNG's pixel dimensions, scaled to fit the slide with a fixed margin and centered; it carries no other layout logic.
+
+This generation path is one-directional: `loadfig()` and `extract_payload()` do not parse `.pptx` packages. Locating and exporting the embedded OLE object from a real presentation is the responsibility of the platform-specific extraction bridges (the Windows export path and the macOS PowerPoint bridge), consistent with [OLE Boundary](#ole-boundary) — Python never scans a PPTX package to guess at an object. A `.pptx` file passed to `loadfig()` is a plain ZIP without the required `manifest.json` entry and so fails safely with `PackageError`, the same as any other invalid container.
+
+Opening the generated file in real PowerPoint for Windows and macOS should be verified manually; this project's test suite validates the package by parsing the generated ZIP/XML structure and round-tripping the embedded OLE bytes through `extract_ole_native_png()`, not by driving PowerPoint itself.
 
 ## Resource Limits
 

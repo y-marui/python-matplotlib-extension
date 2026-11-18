@@ -7,6 +7,7 @@ import binascii
 import re
 import struct
 import uuid
+import zipfile
 import zlib
 from io import BytesIO
 from typing import Any, Final, cast
@@ -14,6 +15,7 @@ from typing import Any, Final, cast
 import olefile
 from pypdf import PdfReader, PdfWriter
 
+from matplotlib_extension import pptx_templates
 from matplotlib_extension.package import (
     MAX_PACKAGE_BYTES,
     PackageError,
@@ -31,6 +33,7 @@ SVG_NAMESPACE: Final = "https://github.com/y-marui/python-matplotlib-extension"
 MAX_RENDERED_BYTES: Final = 512 * 1024 * 1024
 MAX_EDITABLE_PNG_BYTES: Final = MAX_PACKAGE_BYTES + MAX_RENDERED_BYTES
 MAX_OLE_BYTES: Final = MAX_EDITABLE_PNG_BYTES + 16 * 1024 * 1024
+_PPTX_FRAME_MARGIN: Final = 457_200
 
 _SVG_PACKAGE_RE = re.compile(
     rb'<mplex:package\s+xmlns:mplex="https://github\.com/y-marui/python-matplotlib-extension"'
@@ -343,6 +346,67 @@ def embed_ole(editable_png: bytes) -> bytes:
     )
     header = header.ljust(sector_size, b"\x00")
     return header + b"".join(sectors)
+
+
+def _pptx_frame_geometry(editable_png: bytes) -> tuple[int, int, int, int]:
+    """Fit the native PNG's pixel size into the slide, centered, as (x, y, cx, cy)."""
+    if len(editable_png) < 24 or editable_png[12:16] != b"IHDR":
+        raise PackageError("Invalid PNG header for PPTX frame sizing")
+    pixel_width, pixel_height = struct.unpack(">II", editable_png[16:24])
+    if pixel_width <= 0 or pixel_height <= 0:
+        raise PackageError("Invalid PNG dimensions for PPTX frame sizing")
+    max_cx = pptx_templates.PPTX_SLIDE_WIDTH - 2 * _PPTX_FRAME_MARGIN
+    max_cy = pptx_templates.PPTX_SLIDE_HEIGHT - 2 * _PPTX_FRAME_MARGIN
+    scale = min(max_cx / pixel_width, max_cy / pixel_height)
+    cx = max(1, round(pixel_width * scale))
+    cy = max(1, round(pixel_height * scale))
+    x = (pptx_templates.PPTX_SLIDE_WIDTH - cx) // 2
+    y = (pptx_templates.PPTX_SLIDE_HEIGHT - cy) // 2
+    return x, y, cx, cy
+
+
+def _pptx_zip_info(name: str) -> zipfile.ZipInfo:
+    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.create_system = 3
+    info.external_attr = 0o100644 << 16
+    return info
+
+
+def embed_pptx(editable_png: bytes) -> bytes:
+    """Wrap one validated editable PNG in a minimal, portable PPTX presentation.
+
+    The presentation contains exactly one slide with one OLE-object graphic
+    frame. The embedded native file is the generic Package CFB object produced
+    by :func:`embed_ole`; the same editable PNG is reused as the slide's
+    rendered fallback image, so the shape displays before activation. Building
+    this package never requires Windows COM, PowerPoint, or OLE activation.
+    """
+    ole_bytes = embed_ole(editable_png)
+    x, y, cx, cy = _pptx_frame_geometry(editable_png)
+    parts: dict[str, bytes] = {
+        "[Content_Types].xml": pptx_templates.CONTENT_TYPES,
+        "_rels/.rels": pptx_templates.ROOT_RELS,
+        "docProps/core.xml": pptx_templates.CORE_PROPERTIES,
+        "docProps/app.xml": pptx_templates.APP_PROPERTIES,
+        "ppt/presentation.xml": pptx_templates.PRESENTATION,
+        "ppt/_rels/presentation.xml.rels": pptx_templates.PRESENTATION_RELS,
+        "ppt/slideMasters/slideMaster1.xml": pptx_templates.SLIDE_MASTER,
+        "ppt/slideMasters/_rels/slideMaster1.xml.rels": (
+            pptx_templates.SLIDE_MASTER_RELS
+        ),
+        "ppt/slideLayouts/slideLayout1.xml": pptx_templates.SLIDE_LAYOUT,
+        "ppt/slides/slide1.xml": pptx_templates.slide_xml(x, y, cx, cy),
+        "ppt/slides/_rels/slide1.xml.rels": pptx_templates.SLIDE_RELS,
+        "ppt/theme/theme1.xml": pptx_templates.THEME,
+        "ppt/embeddings/oleObject1.bin": ole_bytes,
+        "ppt/media/image1.png": editable_png,
+    }
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w", allowZip64=True) as archive:
+        for name, data in parts.items():
+            archive.writestr(_pptx_zip_info(name), data)
+    return output.getvalue()
 
 
 def _read_cstring(data: bytes, position: int) -> tuple[bytes, int]:

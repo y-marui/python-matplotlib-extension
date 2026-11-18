@@ -18,6 +18,7 @@ from matplotlib_extension.container import (
     embed_ole,
     embed_pdf,
     embed_png,
+    embed_pptx,
     embed_svg,
     extract_ole_native_png,
     extract_payload,
@@ -47,8 +48,10 @@ def _output_format(filename: Path, requested: object) -> str:
         output_format = "mplpkg"
     else:
         output_format = filename.suffix.lower().removeprefix(".")
-    if output_format not in {"pdf", "png", "svg", "ole", "mplpkg"}:
-        raise ValueError("Editable figures support PDF, PNG, SVG, OLE, and MPLPKG")
+    if output_format not in {"pdf", "png", "svg", "ole", "mplpkg", "pptx"}:
+        raise ValueError(
+            "Editable figures support PDF, PNG, SVG, OLE, MPLPKG, and PPTX"
+        )
     return output_format
 
 
@@ -101,7 +104,7 @@ def savefig(
     Args:
         fig: The exact allowlisted Matplotlib ``Figure`` to serialize.
         filename: Destination ending in ``.mpl.pdf``, ``.mpl.png``, ``.mpl.svg``,
-            ``.ole``, or ``.mplpkg``.
+            ``.ole``, ``.mplpkg``, or ``.pptx``.
         editable: When false, delegate to Matplotlib's original ``savefig``.
         mode: ``"w"`` for atomic overwrite or ``"x"`` for exclusive create.
         title: PDF outline title.
@@ -113,8 +116,8 @@ def savefig(
     requested_format = kwargs.pop("format", None)
     output_format = _output_format(destination, requested_format)
     if not editable:
-        if output_format in {"ole", "mplpkg"}:
-            raise ValueError("OLE and MPLPKG are editable-only formats")
+        if output_format in {"ole", "mplpkg", "pptx"}:
+            raise ValueError("OLE, MPLPKG, and PPTX are editable-only formats")
         _ORIGINAL_FIGURE_SAVEFIG(fig, destination, format=output_format, **kwargs)
         return
 
@@ -122,10 +125,15 @@ def savefig(
     payload = dump_package(fig)
     if output_format == "mplpkg":
         output = payload
-    elif output_format == "ole":
+    elif output_format in {"ole", "pptx"}:
         rendered = BytesIO()
         _ORIGINAL_FIGURE_SAVEFIG(fig, rendered, format="png", **kwargs)
-        output = embed_ole(embed_png(rendered.getvalue(), payload))
+        editable_png = embed_png(rendered.getvalue(), payload)
+        output = (
+            embed_pptx(editable_png)
+            if output_format == "pptx"
+            else embed_ole(editable_png)
+        )
     else:
         rendered = BytesIO()
         _ORIGINAL_FIGURE_SAVEFIG(fig, rendered, format=output_format, **kwargs)
