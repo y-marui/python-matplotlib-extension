@@ -1,0 +1,52 @@
+[project]
+name = "legacy-migration-tool"
+version = "0.1.0"
+description = "Deprecated, isolated one-way converter from legacy dill-based .plt.pdf figures to the matplotlib-extension safe .mpl.png format"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.11"
+dependencies = [
+    "dill>=0.3.8",
+    "matplotlib-extension",
+    "pypdf>=6.15.0",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.0",
+    "pytest>=8.0.0",
+    "ruff>=0.4.0",
+]
+
+[project.scripts]
+legacy-migration-tool = "legacy_migration_tool.cli:main"
+
+[tool.uv.sources]
+matplotlib-extension = { path = "..", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = "dill"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["legacy_migration_tool"]

@@ -1,5 +1,6 @@
 __version__ = "0.1.0"
 
+from matplotlib_extension.container import LegacyFigureError
 from matplotlib_extension.package import PackageError, UnsupportedFigureWarning
 from matplotlib_extension.pyplot import (
     extract_editable_png,
@@ -13,6 +14,7 @@ from matplotlib_extension.pyplot import (
 install_matplotlib_savefig()
 
 __all__ = [
+    "LegacyFigureError",
     "PackageError",
     "UnsupportedFigureWarning",
     "extract_editable_png",

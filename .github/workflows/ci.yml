@@ -107,6 +107,29 @@ jobs:
         if: ${{ always() && vars.LINUX_RUNNER && !github.event.pull_request.head.repo.fork }}
         run: uv cache prune --ci
 
+  legacy_migration_tool:
+    name: Legacy migration tool
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ vars.LINUX_RUNNER && !github.event.pull_request.head.repo.fork && vars.LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: legacy-migration-tool
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: ${{ !(vars.LINUX_RUNNER && !github.event.pull_request.head.repo.fork) }}
+      - run: uv sync --group dev
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy legacy_migration_tool
+      - run: uv run pytest
+      - name: Prune local uv cache
+        if: ${{ always() && vars.LINUX_RUNNER && !github.event.pull_request.head.repo.fork }}
+        run: uv cache prune --ci
+
   build:
     name: Build
     needs: [changes, security, lint, test]
@@ -126,7 +149,7 @@ jobs:
 
   gate:
     name: CI
-    needs: [changes, security, lint, test, build]
+    needs: [changes, security, lint, test, legacy_migration_tool, build]
     # draft でも実行して失敗させる: skipped の必須チェックは合格扱いになるため
     # （dev-charter CI_POLICY の Draft PRs 参照）
     if: always()
@@ -148,7 +171,7 @@ jobs:
             echo "docs/config-only change; nothing further to verify"
             exit 0
           fi
-          for result in "${{ needs.lint.result }}" "${{ needs.test.result }}" "${{ needs.build.result }}"; do
+          for result in "${{ needs.lint.result }}" "${{ needs.test.result }}" "${{ needs.legacy_migration_tool.result }}" "${{ needs.build.result }}"; do
             if [ "$result" != "success" ]; then
               echo "::error::a required job did not succeed (got: $result)"
               exit 1

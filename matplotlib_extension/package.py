@@ -19,12 +19,15 @@ import matplotlib
 import matplotlib.scale as mscale
 import numpy as np
 from matplotlib import colors
+from matplotlib.artist import Artist
 from matplotlib.axes import Axes
-from matplotlib.collections import PathCollection
+from matplotlib.collections import LineCollection, PathCollection
+from matplotlib.container import ErrorbarContainer
 from matplotlib.figure import Figure
 from matplotlib.image import AxesImage
 from matplotlib.lines import Line2D
 from matplotlib.markers import MarkerStyle
+from matplotlib.patches import Circle, Patch, Polygon, Rectangle, Wedge
 from matplotlib.scale import (
     AsinhScale,
     LinearScale,
@@ -58,7 +61,7 @@ from matplotlib.ticker import (
 
 PACKAGE_FORMAT: Final = "org.matplotlib-extension.figure-package"
 PACKAGE_VERSION: Final = 1
-FIGURE_SCHEMA_VERSION: Final = 2
+FIGURE_SCHEMA_VERSION: Final = 3
 MAX_PACKAGE_BYTES: Final = 256 * 1024 * 1024
 MAX_JSON_BYTES: Final = 16 * 1024 * 1024
 MAX_ARRAY_BYTES: Final = 128 * 1024 * 1024
@@ -653,6 +656,438 @@ def _image_spec(
     }
 
 
+_PATCH_ROTATION_POINTS: Final = {"xy", "center"}
+_ALLOWED_PATCH_TYPES: Final = (Rectangle, Circle, Polygon, Wedge)
+
+
+def _patch_shape_fields(patch: Patch, arrays: _ArrayStore) -> dict[str, Any] | None:
+    # Each field here is read from the patch's own class-specific accessors
+    # (xy/width/height, center/radius, vertex list, or center/r/theta1/theta2),
+    # which are defined in data coordinates independent of the patch's overall
+    # transform, patch_transform composition. These are returned both for an
+    # exact restore and for the numeric-recovery fallback below.
+    if type(patch) is Rectangle:
+        return {
+            "angle": float(patch.get_angle()),
+            "height": float(patch.get_height()),
+            "type": "Rectangle",
+            "width": float(patch.get_width()),
+            "xy": [float(value) for value in patch.get_xy()],
+        }
+    if type(patch) is Circle:
+        return {
+            "center": [float(value) for value in patch.center],
+            "radius": float(patch.radius),
+            "type": "Circle",
+        }
+    if type(patch) is Polygon:
+        vertices = np.asarray(patch.get_xy(), dtype=float)
+        if vertices.ndim != 2 or vertices.shape[1] != 2:
+            return None
+        return {
+            "closed": bool(patch.get_closed()),
+            "type": "Polygon",
+            "vertices": arrays.add(vertices),
+        }
+    if type(patch) is Wedge:
+        return {
+            "center": [float(value) for value in patch.center],
+            "r": float(patch.r),
+            "theta1": float(patch.theta1),
+            "theta2": float(patch.theta2),
+            "type": "Wedge",
+            "width": None if patch.width is None else float(patch.width),
+        }
+    return None
+
+
+def _patch_color_field(resolved: Any, alpha: float | None) -> str:
+    # Patch._set_facecolor()/_set_edgecolor() resolve a literal "none" color
+    # to alpha 0 regardless of the artist-level alpha (colors.to_rgba
+    # special-cases the string "none"), while any other color's alpha
+    # channel is overridden to equal that artist alpha when one is set. A
+    # resolved alpha of 0 alongside a nonzero artist alpha can therefore
+    # only come from that "none"/unfilled special case (an ordinary color
+    # would have had its alpha overridden to the nonzero value instead), so
+    # store the literal "none" marker there instead of a hex color: feeding
+    # a hex color with a baked-in zero alpha back through
+    # colors.to_rgba(color, alpha) on restore would get its alpha
+    # overridden back to the nonzero artist alpha, turning an invisible
+    # fill/edge into a visible one.
+    rgba = colors.to_rgba(resolved)
+    if alpha not in (None, 0.0) and rgba[3] == 0.0:
+        return "none"
+    return _color(resolved)
+
+
+def _patch_spec(
+    patch: Patch, arrays: _ArrayStore, ax: matplotlib.axes.Axes
+) -> dict[str, Any] | None:
+    # Patch.get_transform() always composes get_patch_transform() (the
+    # shape's own local bbox/rotation transform) with whatever transform was
+    # actually set on the artist, so checking the composed result with
+    # contains_branch() is unreliable here: the extra local composition can
+    # coincidentally structurally equal part of transData's own chain (e.g.
+    # when it shares the figure's pixel bbox) even for a patch explicitly
+    # given transform=ax.transAxes, falsely passing the guard. Calling the
+    # base Artist.get_transform() bypasses that composition and checks
+    # exactly what was set, the same non-data-transform case this guard
+    # exists to catch.
+    if Artist.get_transform(patch) is not ax.transData:
+        return None
+    alpha = patch.get_alpha()
+    if not _is_scalar_alpha(alpha):
+        return None
+    if type(patch) is Rectangle and patch.rotation_point not in _PATCH_ROTATION_POINTS:
+        return None
+    linestyle = patch.get_linestyle()
+    if not isinstance(linestyle, str):
+        return None
+    hatch = patch.get_hatch()
+    if hatch is not None and not isinstance(hatch, str):
+        return None
+    fields = _patch_shape_fields(patch, arrays)
+    if fields is None:
+        return None
+    fields.update(
+        {
+            "alpha": None if alpha is None else float(alpha),
+            "edgecolor": _patch_color_field(patch.get_edgecolor(), alpha),
+            "facecolor": _patch_color_field(patch.get_facecolor(), alpha),
+            "fill": bool(patch.get_fill()),
+            "hatch": hatch,
+            "label": str(patch.get_label()),
+            "linestyle": linestyle,
+            "linewidth": float(patch.get_linewidth()),
+            "visible": bool(patch.get_visible()),
+            "zorder": float(patch.get_zorder()),
+        }
+    )
+    if type(patch) is Rectangle:
+        fields["rotation_point"] = patch.rotation_point
+    return fields
+
+
+def _patch_recovery(
+    patch: Patch, label: str, arrays: _ArrayStore
+) -> dict[str, Any] | None:
+    fields = _patch_shape_fields(patch, arrays)
+    if fields is None:
+        return None
+    fields["artist_type"] = fields.pop("type")
+    fields["label"] = label
+    return fields
+
+
+class _ErrorbarBarInfo:
+    __slots__ = ("alpha", "color", "linewidth", "segments", "visible", "zorder")
+
+    def __init__(
+        self,
+        segments: np.ndarray,
+        color: np.ndarray,
+        linewidth: float,
+        alpha: float | None,
+        zorder: float,
+        visible: bool,
+    ) -> None:
+        self.segments = segments
+        self.color = color
+        self.linewidth = linewidth
+        self.alpha = alpha
+        self.zorder = zorder
+        self.visible = visible
+
+
+def _errorbar_bar_info(
+    bar: Any, ax: matplotlib.axes.Axes, n: int
+) -> _ErrorbarBarInfo | None:
+    if type(bar) is not LineCollection:
+        return None
+    # contains_branch() only checks whether transData is reachable within
+    # the transform's composition tree, so an extra affine step chained
+    # onto transData (e.g. Affine2D().translate(1, 0) + ax.transData) would
+    # still pass; require the exact transform instead, like every other
+    # exactly-restored artist's data-coordinate guard.
+    if bar.get_transform() is not ax.transData:
+        return None
+    alpha = bar.get_alpha()
+    if not _is_scalar_alpha(alpha):
+        return None
+    # The bar's dash pattern is neither saved nor restored (ax.errorbar()
+    # always draws solid bars for this exact-restore path), so a bar that
+    # was given a non-solid linestyle must fall back instead of silently
+    # losing it. Collection.get_linestyle() always normalizes to a list of
+    # (offset, dashes) tuples (its broader declared type also allows a bare
+    # style string, which LineCollection never actually returns here).
+    linestyles = cast(Sequence[tuple[float, Any]], bar.get_linestyle())
+    if any(dashes is not None for _, dashes in linestyles):
+        return None
+    segments = bar.get_segments()
+    if len(segments) != n:
+        return None
+    segments_array = np.asarray(segments, dtype=float)
+    if segments_array.shape != (n, 2, 2):
+        return None
+    if _has_masked_values(segments_array):
+        return None
+    colors_resolved = np.ma.getdata(np.asarray(bar.get_color(), dtype=float))
+    if colors_resolved.ndim != 2 or colors_resolved.shape[-1] != 4:
+        return None
+    if not np.allclose(colors_resolved, colors_resolved[0]):
+        return None
+    widths_resolved = np.ma.getdata(np.asarray(bar.get_linewidth(), dtype=float))
+    if widths_resolved.size == 0 or not np.allclose(
+        widths_resolved, widths_resolved[0]
+    ):
+        return None
+    return _ErrorbarBarInfo(
+        segments=segments_array,
+        color=colors_resolved[0],
+        linewidth=float(widths_resolved[0]),
+        alpha=None if alpha is None else float(alpha),
+        zorder=float(bar.get_zorder()),
+        visible=bool(bar.get_visible()),
+    )
+
+
+class _ErrorbarCapInfo:
+    __slots__ = (
+        "alpha",
+        "color",
+        "markeredgewidth",
+        "markersize",
+        "visible",
+        "xdata",
+        "ydata",
+        "zorder",
+    )
+
+    def __init__(
+        self,
+        color: Any,
+        markersize: float,
+        markeredgewidth: float,
+        alpha: float | None,
+        zorder: float,
+        visible: bool,
+        xdata: np.ndarray,
+        ydata: np.ndarray,
+    ) -> None:
+        self.color = color
+        self.markersize = markersize
+        self.markeredgewidth = markeredgewidth
+        self.alpha = alpha
+        self.zorder = zorder
+        self.visible = visible
+        self.xdata = xdata
+        self.ydata = ydata
+
+
+def _errorbar_cap_info(
+    cap: Any, expected_marker: str, ax: matplotlib.axes.Axes, n: int
+) -> _ErrorbarCapInfo | None:
+    if type(cap) is not Line2D:
+        return None
+    if cap.get_transform() is not ax.transData:
+        return None
+    if cap.get_marker() != expected_marker:
+        return None
+    if str(cap.get_linestyle()) not in {"None", "none"}:
+        return None
+    alpha = cap.get_alpha()
+    if not _is_scalar_alpha(alpha):
+        return None
+    xdata = np.asarray(cap.get_xdata(orig=False), dtype=float)
+    ydata = np.asarray(cap.get_ydata(orig=False), dtype=float)
+    if xdata.shape != (n,) or ydata.shape != (n,) or _has_masked_values(xdata, ydata):
+        return None
+    return _ErrorbarCapInfo(
+        # Caps are markers: their visible color is the marker edge color,
+        # not Line2D.get_color() (the marker face is unfilled for "|"/"_").
+        color=colors.to_rgba(cap.get_markeredgecolor()),
+        markersize=float(cap.get_markersize()),
+        markeredgewidth=float(cap.get_markeredgewidth()),
+        alpha=None if alpha is None else float(alpha),
+        zorder=float(cap.get_zorder()),
+        visible=bool(cap.get_visible()),
+        xdata=xdata,
+        ydata=ydata,
+    )
+
+
+def _errorbar_bar_offsets(
+    segments: np.ndarray, dep: np.ndarray, indep: np.ndarray, *, is_x: bool
+) -> np.ndarray | None:
+    # A bar's two segment endpoints must share the independent coordinate
+    # (axis-aligned) and bracket the data point on the dependent axis with
+    # non-negative extents on both sides. Anything else means the bar (or
+    # the data line) was hand-edited independently -- e.g. moved
+    # perpendicular to the bars, or given a negative derived error -- which
+    # ax.errorbar() cannot reconstruct (it rejects negative error values
+    # outright), so reject it here instead of failing later on restore.
+    indep_index = 1 if is_x else 0
+    dep_index = 0 if is_x else 1
+    if not np.allclose(segments[:, 0, indep_index], indep) or not np.allclose(
+        segments[:, 1, indep_index], indep
+    ):
+        return None
+    low = dep - segments[:, 0, dep_index]
+    high = segments[:, 1, dep_index] - dep
+    if np.any(low < 0) or np.any(high < 0):
+        return None
+    return np.stack([low, high])
+
+
+def _errorbar_spec(
+    container: Any, arrays: _ArrayStore, ax: matplotlib.axes.Axes
+) -> dict[str, Any] | None:
+    if type(container) is not ErrorbarContainer:
+        return None
+    dataline, caps, bars = container.lines
+    if dataline is None or type(dataline) is not Line2D:
+        return None
+    if dataline.get_transform() is not ax.transData:
+        return None
+    has_xerr = bool(getattr(container, "has_xerr", False))
+    has_yerr = bool(getattr(container, "has_yerr", False))
+    if not has_xerr and not has_yerr:
+        return None
+    x = np.asarray(dataline.get_xdata(orig=False), dtype=float)
+    y = np.asarray(dataline.get_ydata(orig=False), dtype=float)
+    if x.ndim != 1 or y.shape != x.shape or _has_masked_values(x, y):
+        return None
+    n = x.shape[0]
+    expected_bars = (1 if has_xerr else 0) + (1 if has_yerr else 0)
+    if len(bars) != expected_bars:
+        return None
+
+    bar_infos: list[_ErrorbarBarInfo] = []
+    for bar in bars:
+        info = _errorbar_bar_info(bar, ax, n)
+        if info is None:
+            return None
+        bar_infos.append(info)
+    first_bar = bar_infos[0]
+    for info in bar_infos[1:]:
+        if (
+            not np.allclose(info.color, first_bar.color)
+            or info.linewidth != first_bar.linewidth
+            or info.alpha != first_bar.alpha
+            or info.zorder != first_bar.zorder
+            or info.visible != first_bar.visible
+        ):
+            return None
+
+    bar_index = 0
+    xerr_ref: str | None = None
+    yerr_ref: str | None = None
+    xerr_segments: np.ndarray | None = None
+    yerr_segments: np.ndarray | None = None
+    if has_xerr:
+        xerr_segments = bar_infos[bar_index].segments
+        bar_index += 1
+        xerr_offsets = _errorbar_bar_offsets(xerr_segments, x, y, is_x=True)
+        if xerr_offsets is None:
+            return None
+        xerr_ref = arrays.add(xerr_offsets)
+    if has_yerr:
+        yerr_segments = bar_infos[bar_index].segments
+        bar_index += 1
+        yerr_offsets = _errorbar_bar_offsets(yerr_segments, y, x, is_x=False)
+        if yerr_offsets is None:
+            return None
+        yerr_ref = arrays.add(yerr_offsets)
+
+    expected_caps = 0
+    if has_xerr:
+        expected_caps += 2
+    if has_yerr:
+        expected_caps += 2
+    capsize = 0.0
+    capthick = 0.0
+    if len(caps) == expected_caps and expected_caps > 0:
+        cap_infos: list[_ErrorbarCapInfo] = []
+        cap_segment_pairs: list[np.ndarray] = []
+        cap_index = 0
+        if has_xerr:
+            assert xerr_segments is not None
+            for cap in caps[cap_index : cap_index + 2]:
+                cap_info = _errorbar_cap_info(cap, "|", ax, n)
+                if cap_info is None:
+                    return None
+                cap_infos.append(cap_info)
+            cap_segment_pairs.append(xerr_segments)
+            cap_index += 2
+        if has_yerr:
+            assert yerr_segments is not None
+            for cap in caps[cap_index : cap_index + 2]:
+                cap_info = _errorbar_cap_info(cap, "_", ax, n)
+                if cap_info is None:
+                    return None
+                cap_infos.append(cap_info)
+            cap_segment_pairs.append(yerr_segments)
+            cap_index += 2
+        # Each pair of caps must sit exactly at its bar's two endpoints --
+        # ax.errorbar() positions caps there itself, so any mismatch means a
+        # cap (or the bar) was hand-edited independently of the other.
+        for pair_index, segments in enumerate(cap_segment_pairs):
+            low_cap = cap_infos[pair_index * 2]
+            high_cap = cap_infos[pair_index * 2 + 1]
+            if not np.allclose(
+                [low_cap.xdata, low_cap.ydata], segments[:, 0, :].T
+            ) or not np.allclose([high_cap.xdata, high_cap.ydata], segments[:, 1, :].T):
+                return None
+        first_cap = cap_infos[0]
+        if (
+            first_cap.alpha != first_bar.alpha
+            or first_cap.zorder != first_bar.zorder
+            or first_cap.visible != first_bar.visible
+        ):
+            return None
+        for cap_info in cap_infos[1:]:
+            if (
+                not np.allclose(
+                    colors.to_rgba(cap_info.color), colors.to_rgba(first_cap.color)
+                )
+                or cap_info.markersize != first_cap.markersize
+                or cap_info.markeredgewidth != first_cap.markeredgewidth
+                or cap_info.alpha != first_bar.alpha
+                or cap_info.zorder != first_bar.zorder
+                or cap_info.visible != first_bar.visible
+            ):
+                return None
+        # Which color caps default to (the main "color", or ecolor) differs
+        # across Matplotlib versions, so the cap color actually used is
+        # stored and passed explicitly on restore rather than relying on
+        # whichever default the installed Matplotlib currently applies.
+        capcolor = _color(first_cap.color)
+        capsize = first_cap.markersize / 2.0
+        capthick = first_cap.markeredgewidth
+    elif len(caps) != 0:
+        return None
+    else:
+        capcolor = None
+
+    # The data line's own xdata/ydata (already stored by _line_spec) double as
+    # the errorbar's x/y: no separate array entries are needed for them.
+    line_spec = _line_spec(dataline, arrays)
+    return {
+        "alpha": first_bar.alpha,
+        "capcolor": capcolor,
+        "capsize": capsize,
+        "capthick": capthick,
+        "ecolor": _color(first_bar.color),
+        "elinewidth": first_bar.linewidth,
+        "label": str(container.get_label()),
+        "line": line_spec,
+        "visible": first_bar.visible,
+        "xerr": xerr_ref,
+        "yerr": yerr_ref,
+        "zorder": first_bar.zorder,
+    }
+
+
 def _locator_spec(
     locator: Any, arrays: _ArrayStore, collected: list[str]
 ) -> dict[str, Any] | None:
@@ -781,9 +1216,42 @@ def _scale_name(axis: matplotlib.axis.Axis, collected: list[str]) -> str:
 def _axes_spec(
     ax: matplotlib.axes.Axes, arrays: _ArrayStore, collected: list[str]
 ) -> dict[str, Any]:
+    # ErrorbarContainers are resolved first so their data line, cap Line2Ds,
+    # and bar LineCollections can be excluded from the generic lines/
+    # collections loops below instead of being saved (and restored) twice.
+    errorbars: list[dict[str, Any]] = []
+    errorbar_identity_to_index: dict[int, int] = {}
+    consumed_line_ids: set[int] = set()
+    consumed_collection_ids: set[int] = set()
+    for container in ax.containers:
+        if type(container) is not ErrorbarContainer:
+            continue
+        try:
+            errorbar_spec = _errorbar_spec(container, arrays, ax)
+        except (PackageError, TypeError, ValueError) as exc:
+            _warn(f"Skipped ErrorbarContainer: {exc}", collected)
+            continue
+        if errorbar_spec is None:
+            _warn(
+                "Skipped ErrorbarContainer that does not match the exact "
+                "restorable shape; its line and collection sub-artists are "
+                "recorded individually",
+                collected,
+            )
+            continue
+        errorbars.append(errorbar_spec)
+        errorbar_identity_to_index[id(container)] = len(errorbars) - 1
+        dataline, caps, bars = container.lines
+        if dataline is not None:
+            consumed_line_ids.add(id(dataline))
+        consumed_line_ids.update(id(cap) for cap in caps)
+        consumed_collection_ids.update(id(bar) for bar in bars)
+
     lines: list[dict[str, Any]] = []
     line_identity_to_index: dict[int, int] = {}
     for line in ax.lines:
+        if id(line) in consumed_line_ids:
+            continue
         if type(line) is not Line2D:
             _warn(f"Skipped unsupported line class {type(line).__name__}", collected)
             continue
@@ -815,6 +1283,8 @@ def _axes_spec(
     collections: list[dict[str, Any]] = []
     collection_identity_to_index: dict[int, int] = {}
     for collection in ax.collections:
+        if id(collection) in consumed_collection_ids:
+            continue
         if type(collection) is not PathCollection:
             _warn(
                 f"Skipped unsupported collection class {type(collection).__name__}",
@@ -884,9 +1354,36 @@ def _axes_spec(
             )
         except (PackageError, TypeError, ValueError) as exc:
             _warn(f"Skipped AxesImage recovery data: {exc}", collected)
+    patches: list[dict[str, Any]] = []
+    patch_identity_to_index: dict[int, int] = {}
+    for patch in ax.patches:
+        if type(patch) not in _ALLOWED_PATCH_TYPES:
+            _warn(f"Skipped unsupported patch class {type(patch).__name__}", collected)
+            continue
+        try:
+            patch_spec = _patch_spec(patch, arrays, ax)
+        except (PackageError, TypeError, ValueError) as exc:
+            _warn(f"Skipped {type(patch).__name__}: {exc}", collected)
+            continue
+        if patch_spec is not None:
+            patches.append(patch_spec)
+            patch_identity_to_index[id(patch)] = len(patches) - 1
+            continue
+        try:
+            recovery_record = _patch_recovery(patch, str(patch.get_label()), arrays)
+            if recovery_record is None:
+                raise PackageError(f"{type(patch).__name__} has no recoverable data")
+            recovery.append(recovery_record)
+            _warn(
+                f"Stored raw numeric data for unsupported {type(patch).__name__}; "
+                "artist skipped",
+                collected,
+            )
+        except (PackageError, TypeError, ValueError) as exc:
+            _warn(f"Skipped {type(patch).__name__} recovery data: {exc}", collected)
+
     unsupported_groups: dict[str, Sequence[Any]] = {
         "artist": cast(Sequence[Any], ax.artists),
-        "patch": cast(Sequence[Any], ax.patches),
         "table": cast(Sequence[Any], ax.tables),
     }
     for group_name, artists in unsupported_groups.items():
@@ -926,6 +1423,23 @@ def _axes_spec(
                             "type": "collection",
                         }
                     )
+                elif (
+                    type(handle) in _ALLOWED_PATCH_TYPES
+                    and id(handle) in patch_identity_to_index
+                ):
+                    entries.append(
+                        {"index": patch_identity_to_index[id(handle)], "type": "patch"}
+                    )
+                elif (
+                    type(cast(Any, handle)) is ErrorbarContainer
+                    and id(handle) in errorbar_identity_to_index
+                ):
+                    entries.append(
+                        {
+                            "index": errorbar_identity_to_index[id(handle)],
+                            "type": "errorbar",
+                        }
+                    )
                 else:
                     break
             if len(entries) != len(legend_texts):
@@ -951,10 +1465,12 @@ def _axes_spec(
         "aspect": aspect,
         "axis_on": bool(ax.axison),
         "collections": collections,
+        "errorbars": errorbars,
         "facecolor": _color(ax.get_facecolor()),
         "images": images,
         "legend": legend_spec,
         "lines": lines,
+        "patches": patches,
         "position": [float(value) for value in ax.get_position(original=True).bounds],
         "recovery": recovery,
         "texts": texts,
@@ -1156,7 +1672,18 @@ def recover_numeric_data(payload: bytes) -> list[dict[str, Any]]:
         )
         for record_value in records:
             record = _mapping(record_value, "recovery record")
-            artist_type = _enum(record, "artist_type", {"PathCollection", "AxesImage"})
+            artist_type = _enum(
+                record,
+                "artist_type",
+                {
+                    "PathCollection",
+                    "AxesImage",
+                    "Rectangle",
+                    "Circle",
+                    "Polygon",
+                    "Wedge",
+                },
+            )
             result: dict[str, Any] = {
                 "artist_type": artist_type,
                 "axes_index": axes_index,
@@ -1170,9 +1697,29 @@ def recover_numeric_data(payload: bytes) -> list[dict[str, Any]]:
                     if record.get("values") is None
                     else _load_array(files, record.get("values"))
                 )
-            else:
+            elif artist_type == "AxesImage":
                 result["data"] = _load_array(files, record.get("data"))
                 result["extent"] = _number_list(record.get("extent"), "extent", 4)
+            elif artist_type == "Rectangle":
+                result["xy"] = _number_list(record.get("xy"), "xy", 2)
+                result["width"] = _finite_number(record.get("width"), "width")
+                result["height"] = _finite_number(record.get("height"), "height")
+                result["angle"] = _finite_number(record.get("angle"), "angle")
+            elif artist_type == "Circle":
+                result["center"] = _number_list(record.get("center"), "center", 2)
+                result["radius"] = _finite_number(record.get("radius"), "radius")
+            elif artist_type == "Polygon":
+                result["vertices"] = _load_array(files, record.get("vertices"))
+                result["closed"] = _boolean(record, "closed")
+            else:
+                result["center"] = _number_list(record.get("center"), "center", 2)
+                result["r"] = _finite_number(record.get("r"), "r")
+                result["theta1"] = _finite_number(record.get("theta1"), "theta1")
+                result["theta2"] = _finite_number(record.get("theta2"), "theta2")
+                width = record.get("width")
+                result["width"] = (
+                    None if width is None else _finite_number(width, "width")
+                )
             recovered.append(result)
     return recovered
 
@@ -1251,6 +1798,14 @@ def _optional_number(spec: Mapping[str, Any], key: str) -> float | None:
     if spec.get(key) is None:
         return None
     return _number(spec, key)
+
+
+def _optional_string(
+    spec: Mapping[str, Any], key: str, *, max_length: int
+) -> str | None:
+    if spec.get(key) is None:
+        return None
+    return _string(spec, key, max_length=max_length)
 
 
 def _enum(spec: Mapping[str, Any], key: str, allowed: Collection[str]) -> Any:
@@ -1534,6 +2089,120 @@ def _restore_image(
     image.set_zorder(_number(item, "zorder", minimum=-1_000_000, maximum=1_000_000))
 
 
+def _restore_patch(
+    ax: matplotlib.axes.Axes, spec: object, files: Mapping[str, bytes]
+) -> Patch:
+    item = _mapping(spec, "patch")
+    patch_type = _enum(item, "type", {"Rectangle", "Circle", "Polygon", "Wedge"})
+    style: dict[str, Any] = {
+        "alpha": _optional_number(item, "alpha"),
+        "edgecolor": _safe_color(item, "edgecolor"),
+        "facecolor": _safe_color(item, "facecolor"),
+        "fill": _boolean(item, "fill"),
+        "hatch": _optional_string(item, "hatch", max_length=100),
+        "label": _string(item, "label", max_length=MAX_TEXT_LENGTH),
+        "linestyle": _string(item, "linestyle", max_length=100),
+        "linewidth": _number(item, "linewidth", minimum=0, maximum=1_000_000),
+    }
+    patch: Patch
+    if patch_type == "Rectangle":
+        xy = _number_list(item.get("xy"), "xy", 2)
+        rotation_point = _enum(item, "rotation_point", _PATCH_ROTATION_POINTS)
+        patch = Rectangle(
+            (xy[0], xy[1]),
+            _number(item, "width", minimum=-1e300, maximum=1e300),
+            _number(item, "height", minimum=-1e300, maximum=1e300),
+            angle=_number(item, "angle", minimum=-1_000_000, maximum=1_000_000),
+            rotation_point=rotation_point,
+            **style,
+        )
+    elif patch_type == "Circle":
+        center = _number_list(item.get("center"), "center", 2)
+        patch = Circle(
+            (center[0], center[1]),
+            radius=_number(item, "radius", minimum=0, maximum=1e300),
+            **style,
+        )
+    elif patch_type == "Polygon":
+        vertices = _load_array(files, item.get("vertices"))
+        if vertices.ndim != 2 or vertices.shape[1] != 2:
+            raise PackageError("Invalid polygon vertices")
+        patch = Polygon(vertices, closed=_boolean(item, "closed"), **style)
+    else:
+        center = _number_list(item.get("center"), "center", 2)
+        width = item.get("width")
+        patch = Wedge(
+            (center[0], center[1]),
+            _number(item, "r", minimum=0, maximum=1e300),
+            _number(item, "theta1", minimum=-1_000_000, maximum=1_000_000),
+            _number(item, "theta2", minimum=-1_000_000, maximum=1_000_000),
+            width=None
+            if width is None
+            else _number(item, "width", minimum=0, maximum=1e300),
+            **style,
+        )
+    ax.add_patch(patch)
+    patch.set_visible(_boolean(item, "visible"))
+    patch.set_zorder(_number(item, "zorder", minimum=-1_000_000, maximum=1_000_000))
+    return patch
+
+
+def _restore_errorbar(
+    ax: matplotlib.axes.Axes, spec: object, files: Mapping[str, bytes]
+) -> ErrorbarContainer:
+    item = _mapping(spec, "errorbar")
+    line = _restore_line(ax, _mapping(item.get("line"), "errorbar line"), files)
+    x = np.asarray(line.get_xdata(orig=False))
+    y = np.asarray(line.get_ydata(orig=False))
+    n = x.shape[0]
+    xerr_ref = item.get("xerr")
+    yerr_ref = item.get("yerr")
+    xerr = None if xerr_ref is None else _load_array(files, xerr_ref)
+    yerr = None if yerr_ref is None else _load_array(files, yerr_ref)
+    for err in (xerr, yerr):
+        if err is not None and err.shape != (2, n):
+            raise PackageError("Invalid errorbar xerr/yerr shape")
+    capcolor = item.get("capcolor")
+    container = ax.errorbar(
+        x,
+        y,
+        xerr=xerr,
+        yerr=yerr,
+        fmt="none",
+        ecolor=_safe_color(item, "ecolor"),
+        elinewidth=_number(item, "elinewidth", minimum=0, maximum=1_000_000),
+        capsize=_number(item, "capsize", minimum=0, maximum=1_000_000),
+        capthick=_number(item, "capthick", minimum=0, maximum=1_000_000),
+        alpha=_optional_number(item, "alpha"),
+        zorder=_number(item, "zorder", minimum=-1_000_000, maximum=1_000_000),
+        visible=_boolean(item, "visible"),
+        label=_string(item, "label", max_length=MAX_TEXT_LENGTH),
+    )
+    _, caps, bars = container.lines
+    if capcolor is not None:
+        # Matplotlib sets a cap's visible marker-edge color from its own
+        # `eb_cap_style` (derived from `ecolor`) at creation time, not from
+        # a `color=` kwarg passed to errorbar(); apply the saved resolved
+        # color directly so it survives regardless of that internal default.
+        capcolor_value = _safe_color(item, "capcolor")
+        for cap in caps:
+            cap.set_markeredgecolor(capcolor_value)
+    # Assigning to `.lines` does not update the (immutable-by-convention)
+    # tuple Container.__getitem__ exposes -- container[0] would stay None --
+    # and Matplotlib's legend handler unpacks that tuple directly. Build a
+    # fresh container around the restored data line instead, and register it
+    # in the Axes' containers list in place of the one errorbar() added.
+    new_container = ErrorbarContainer(
+        (line, caps, bars),
+        has_xerr=container.has_xerr,
+        has_yerr=container.has_yerr,
+        label=container.get_label(),
+    )
+    new_container._remove_method = ax.containers.remove  # type: ignore[attr-defined]
+    ax.containers[ax.containers.index(container)] = new_container
+    return new_container
+
+
 def _restore_scale(name: str, axis: matplotlib.axis.Axis) -> ScaleBase:
     scale_type = _SCALE_TYPES.get(name)
     if scale_type is None:
@@ -1573,6 +2242,16 @@ def _restore_axes(figure: Figure, spec: object, files: Mapping[str, bytes]) -> N
     images = _sequence(item.get("images", []), "images", max_items=MAX_ARTISTS_PER_AXES)
     for image_spec in images:
         _restore_image(ax, image_spec, files)
+    patches = _sequence(
+        item.get("patches", []), "patches", max_items=MAX_ARTISTS_PER_AXES
+    )
+    restored_patches = [_restore_patch(ax, patch_spec, files) for patch_spec in patches]
+    errorbars = _sequence(
+        item.get("errorbars", []), "errorbars", max_items=MAX_ARTISTS_PER_AXES
+    )
+    restored_errorbars = [
+        _restore_errorbar(ax, errorbar_spec, files) for errorbar_spec in errorbars
+    ]
     texts = _sequence(item.get("texts"), "texts", max_items=MAX_ARTISTS_PER_AXES)
     for text_value in texts:
         text_spec = _mapping(text_value, "text")
@@ -1617,11 +2296,19 @@ def _restore_axes(figure: Figure, spec: object, files: Mapping[str, bytes]) -> N
         handles: list[Any] = []
         for entry_value in entries:
             entry = _mapping(entry_value, "legend entry")
-            kind = _enum(entry, "type", {"line", "collection"})
+            kind = _enum(entry, "type", {"line", "collection", "patch", "errorbar"})
             index = entry.get("index")
             if not isinstance(index, int) or isinstance(index, bool) or index < 0:
                 raise PackageError("Invalid legend entry index")
-            source = ax.lines if kind == "line" else ax.collections
+            source = cast(
+                Sequence[Any],
+                {
+                    "line": ax.lines,
+                    "collection": ax.collections,
+                    "patch": restored_patches,
+                    "errorbar": restored_errorbars,
+                }[kind],
+            )
             if index >= len(source):
                 raise PackageError("Legend entry index is out of range")
             handles.append(source[index])
