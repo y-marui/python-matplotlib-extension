@@ -25,7 +25,11 @@ from PIL import Image
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import NameObject
 
-from matplotlib_extension.container import extract_ole_native_png, extract_payload
+from matplotlib_extension.container import (
+    LegacyFigureError,
+    extract_ole_native_png,
+    extract_payload,
+)
 from matplotlib_extension.package import (
     PackageError,
     UnsupportedFigureWarning,
@@ -424,8 +428,27 @@ def test_legacy_object_attachment_is_never_restored(tmp_path: Path) -> None:
     with legacy.open("wb") as stream:
         writer.write(stream)
 
-    with pytest.raises(PackageError, match="exactly one editable payload"):
+    with pytest.raises(LegacyFigureError, match="legacy-migration-tool"):
         loadfig(legacy)
+    plt.close(fig)
+
+
+def test_unrecognized_pdf_attachment_still_gets_the_generic_error(
+    tmp_path: Path,
+) -> None:
+    fig = _simple_figure()
+    rendered = BytesIO()
+    fig.savefig(rendered, format="pdf")
+    reader = PdfReader(BytesIO(rendered.getvalue()))
+    writer = PdfWriter(clone_from=reader)
+    writer.add_attachment("something-else.bin", b"not a recognized legacy signature")
+    unknown = tmp_path / "unknown.plt.pdf"
+    with unknown.open("wb") as stream:
+        writer.write(stream)
+
+    with pytest.raises(PackageError, match="exactly one editable payload") as excinfo:
+        loadfig(unknown)
+    assert not isinstance(excinfo.value, LegacyFigureError)
     plt.close(fig)
 
 

@@ -28,6 +28,7 @@ PDF_SIGNATURE: Final = b"%PDF-"
 CFB_SIGNATURE: Final = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 PNG_CHUNK: Final = b"mpFg"
 PDF_ATTACHMENT: Final = "matplotlib-extension.mplpkg"
+LEGACY_PDF_ATTACHMENT: Final = "fig.dill"
 OLE_STREAM: Final = "\x01Ole10Native"
 OLE_NATIVE_NAME: Final = b"figure.mpl.png"
 SVG_NAMESPACE: Final = "https://github.com/y-marui/python-matplotlib-extension"
@@ -40,6 +41,16 @@ _SVG_PACKAGE_RE = re.compile(
     rb'<mplex:package\s+xmlns:mplex="https://github\.com/y-marui/python-matplotlib-extension"'
     rb'\s+encoding="base64">([A-Za-z0-9+/=\r\n]+)</mplex:package>'
 )
+
+
+class LegacyFigureError(PackageError):
+    """Raised for input recognized as a legacy, pre-safe-format figure.
+
+    Recognition is by container-name signature only; this never imports
+    dill or parses the attached legacy object stream. See
+    docs/EDITABLE_FORMAT.md's "Legacy Files" section and the separate
+    legacy-migration-tool for a one-way, isolated conversion path.
+    """
 
 
 def _validated_payload(payload: bytes) -> bytes:
@@ -131,6 +142,18 @@ def extract_pdf(data: bytes) -> bytes:
             raise PackageError("PDF embedded-file name trees are not supported")
         entries = embedded_files["/Names"].get_object()
         if len(entries) != 2 or str(entries[0]) != PDF_ATTACHMENT:
+            if any(
+                str(entries[index]) == LEGACY_PDF_ATTACHMENT
+                for index in range(0, len(entries), 2)
+            ):
+                raise LegacyFigureError(
+                    "This PDF contains a legacy dill-serialized figure, "
+                    "not the safe data-only package; loadfig() never "
+                    "deserializes that object stream. See "
+                    "docs/EDITABLE_FORMAT.md 'Legacy Files' and the "
+                    "separate legacy-migration-tool for a one-way, "
+                    "isolated conversion to '.mpl.png'."
+                )
             raise PackageError("PDF must contain exactly one editable payload")
         file_spec = entries[1].get_object()
         if (
