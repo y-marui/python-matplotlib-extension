@@ -64,7 +64,7 @@ OLE Packageへ埋め込むnative file自体を`figure.mpl.png`とする。標準
 
 Windowsでは、別配布の抽出専用ブリッジ（[`windows-powerpoint-bridge/`](windows-powerpoint-bridge/)）が、稼働中のPowerPoint for Windowsへの読み取り専用COM automationでユーザーの選択したOLE Shapeを取得し、presentationの保存済みファイル内でそのOOXML/OLE relationshipを解決して、`figure.mpl.png`だけを保存する。このブリッジはFigureのrestoreや編集を行わず、稼働中のpresentationを保存・exportするなど変更する操作も一切行わない。編集処理は引き続きPythonだけで行う。
 
-MacではWindows OLEのactivationやverbに依存しない。PowerPoint用の抽出専用ブリッジが、ユーザーの選択したOLE Shapeと現在のPPTXコピーをPowerPoint APIから取得し、そのShapeが参照する内部OLE objectからnative PNGを取り出して`figure.mpl.png`として保存する。PPTX全体をPythonへ渡して対象を推測させず、ブリッジ内でもFigureのrestoreや編集は行わない。
+MacではWindows OLEのactivationやverbに依存しない。別配布の抽出専用ブリッジ（[`macos-powerpoint-bridge/`](macos-powerpoint-bridge/)）が、PowerPoint for Macで現在選択されているShapeを読み取り、PPTX package自身のOOXML relationshipをたどって対応する内部OLE objectを解決し、`figure.mpl.png`だけを保存する。PPTX全体を走査して対象を推測せず、PowerPointの`save`コマンド（Save Asと同様の挙動でliveなdocumentを別fileに付け替えてしまう）をliveなdocumentに対して呼ぶこともなく、ブリッジ内でもFigureのrestoreや編集は行わない。
 
 独立 API では atomic overwrite と排他作成も指定できる。
 
