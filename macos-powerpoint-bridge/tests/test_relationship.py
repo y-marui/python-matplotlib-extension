@@ -235,6 +235,25 @@ def test_resolves_correctly_after_slides_are_reordered() -> None:
         resolve_ole_part(reordered_data, slide_index=1, shape_name="Figure 1")
 
 
+def test_resolves_the_real_powerpoint_reordered_fixture() -> None:
+    """``multi_figure_powerpoint_reordered.pptx`` is a real PowerPoint for
+    Mac pass: slide 3 dragged to the front (AppleScript's generic ``move``
+    command) and saved, so slide order is now Figure 3, Figure 1, Figure 2
+    (issue #91)."""
+    original = (FIXTURES / "multi_figure_powerpoint_resaved.pptx").read_bytes()
+    reordered = (FIXTURES / "multi_figure_powerpoint_reordered.pptx").read_bytes()
+
+    for new_index, original_index in ((1, 3), (2, 1), (3, 2)):
+        name = f"Figure {original_index}"
+        assert resolve_ole_part(
+            reordered, slide_index=new_index, shape_name=name
+        ) == resolve_ole_part(original, slide_index=original_index, shape_name=name)
+
+    # The pre-reorder assumption (slide index 1 holds "Figure 1") is rejected.
+    with pytest.raises(BridgeError, match="does not match the selected shape"):
+        resolve_ole_part(reordered, slide_index=1, shape_name="Figure 1")
+
+
 def test_rejects_an_oversized_ole_embedding_before_decompressing_it() -> None:
     """A ZIP member whose declared uncompressed size exceeds the limit must
     be rejected from its metadata alone, before any bytes are decompressed
