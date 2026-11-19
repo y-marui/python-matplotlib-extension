@@ -114,3 +114,9 @@ uv run macos-powerpoint-bridge DESTINATION.mpl.png
   Bindings" and "OLE Boundary" sections.
 - [Issue #77](https://github.com/y-marui/python-matplotlib-extension/issues/77)
   tracks this tool.
+
+## Supported versions
+
+Only PowerPoint for Mac 16.112.4 (Microsoft 365) is verified. Older
+perpetual-license versions are out of scope (not tested, not supported);
+a presentation whose structure differs from the fixtures fails closed.

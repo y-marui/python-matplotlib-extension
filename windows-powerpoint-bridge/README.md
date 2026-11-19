@@ -127,9 +127,10 @@ session (issue #91):
   file: no selection (`Selection.Type` 0), a slide selection (type 1),
   two shapes selected on one slide, and an unsaved presentation.
 
-**Not yet confirmed**:
-
-- Older perpetual-license PowerPoint for Windows versions.
+**Supported versions**: only PowerPoint for Windows 16.0 as shipped with
+Microsoft 365 (build 20527) is verified. Older perpetual-license
+versions are out of scope (not tested, not supported); a presentation
+whose structure differs from the fixtures fails closed.
 
 ## Interactive-session COM access (confirmed)
 
