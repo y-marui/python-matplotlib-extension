@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import json
 import struct
-import tokenize
 import zipfile
 from io import BytesIO
 from typing import Any
@@ -26,104 +25,14 @@ from matplotlib_extension.package import PackageError, dump_package
 # Boundary section).
 DOCUMENTED_EXCEPTIONS: tuple[type[BaseException], ...] = (PackageError,)
 
-# Pre-existing gaps this fuzz suite found in matplotlib_extension/package.py,
-# which this PR's scope deliberately excludes from fixing (see the PR
-# description's "parser gaps found but not fixed" section for the precise
-# repro of each). Every one shares the same root cause: a value passes this
-# project's own range/type checks but is then handed to a raw NumPy or
-# Matplotlib constructor/setter with no surrounding try/except, so a
-# genuinely malformed package can make a reader raise a plain exception
-# instead of ``PackageError``.
-#
-# Grouped by the *specific* code path that can actually reach each one, not
-# applied blanket to every reader: an entry point that cannot reach a given
-# path must still be held to the strict "PackageError or nothing" contract,
-# so a genuinely new leak on *that* path is never silently excused by a gap
-# that only exists somewhere else.
-#
-# ``_load_array`` (raw ``numpy.load()`` parsing) is reachable from both
-# ``recover_numeric_data`` and ``load_package``:
-# - ``.npy`` array bytes that happen to start with the ZIP local-file-header
-#   magic (``PK\x03\x04``) make ``numpy.load`` attempt to open the stream as
-#   an ``.npz`` zip archive; a truncated/invalid one leaks a bare
-#   ``zipfile.BadZipFile``;
-# - a malformed (but not-quite-garbage) ``.npy`` header leaks a bare
-#   ``tokenize.TokenError`` from NumPy's own header-dict parser.
-ARRAY_LOAD_LEAK_TYPES: tuple[type[BaseException], ...] = (
-    zipfile.BadZipFile,
-    tokenize.TokenError,
-)
-
-# ``_validated_files`` is the shared ZIP-structure validator behind every
-# reader (``inspect_package``, ``recover_numeric_data``, ``load_package``)
-# *and*, transitively via ``inspect_package``, every container.py extractor
-# (``extract_png``/``extract_pdf``/``extract_svg``/``extract_ole_native_png``
-# all call it before returning "successfully"). It wraps only the
-# ``zipfile.ZipFile(...)`` *constructor* call in
-# ``try/except zipfile.BadZipFile``. zipfile performs a second, *lazy*
-# consistency check -- comparing each entry's local file header against its
-# central directory record, and re-seeking within the underlying buffer --
-# only when that entry is actually read (``archive.read(name)``/
-# ``archive.open(name)``), which happens later in the same function, outside
-# that try/except. A ZIP whose central directory parses fine but is
-# internally inconsistent with the real bytes (e.g. a corrupted
-# filename-length field, overlapping entries, or a local header offset that
-# no longer lines up after a byte deletion/insertion elsewhere in the file)
-# is therefore only caught at read time, and -- depending on exactly which
-# internal zipfile check trips -- leaks either a bare ``zipfile.BadZipFile``
-# ("File name in directory ... and header ... differ", "Overlapped entries
-# ... possible zip bomb") or a bare ``ValueError`` ("negative seek value ...",
-# from zipfile's own ``_SharedFile.read``) instead of ``PackageError``, from
-# *every* one of those entry points. The ``ValueError`` shape was found by
-# fuzzing (a byte-deletion mutation of a real SVG's embedded package) and has
-# no committed deterministic fixture -- reproducing the exact internal seek
-# arithmetic by hand is fragile -- but is the same root cause and call site
-# as the ``BadZipFile`` shape pinned in
-# ``test_mismatched_local_header_filename_leaks_plain_badzipfile``.
-#
-# Tolerating a bare ``ValueError`` here is deliberately scoped to this one
-# gap, not a general "any ValueError" exemption: every other function on
-# inspect_package's/recover_numeric_data's call graph
-# (``_read_json``/``_validated_files``/``_mapping``/``_sequence``/``_enum``/
-# ``_number``/... and ``_load_array``'s own numpy.load() wrapping) already
-# converts its own failures to ``PackageError`` explicitly, so the only
-# remaining source of a bare ``ValueError`` on those two entry points is this
-# shared zipfile call site. (``load_package`` already tolerates bare
-# ``ValueError`` more broadly via ``ARTIST_RESTORE_LEAK_TYPES``, for the
-# unrelated artist-restoration gap below.)
-ZIP_STRUCTURE_LEAK_TYPES: tuple[type[BaseException], ...] = (
-    zipfile.BadZipFile,
-    ValueError,
-)
-
-# ``Line2D``/``Text`` artist restoration (``_restore_line``/
-# ``_apply_text_spec``, via ``_restore_axes``) is reachable only from
-# ``load_package`` -- ``recover_numeric_data`` never restores artists, and
-# ``inspect_package`` never even reads ``figure.json``:
-# - an invalid ``linestyle``/``fontweight`` string reaching ``Line2D``/
-#   ``Text`` leaks a bare ``ValueError`` from Matplotlib;
-# - mismatched ``xdata``/``ydata`` array lengths leak a bare ``ValueError``
-#   (shape mismatch) or ``RuntimeError`` (a 0-d/scalar array is not
-#   "iterable") from Matplotlib's own validation during ``Axes.add_line``.
-ARTIST_RESTORE_LEAK_TYPES: tuple[type[BaseException], ...] = (
-    ValueError,
-    RuntimeError,
-)
-
-# None of the above is a subclass of the ``(OSError, ValueError, EOFError)``
-# tuple ``_load_array`` catches around ``numpy.load()`` except the one
-# ValueError case, which instead comes from an entirely separate, uncaught
-# call site (``Axes.add_line`` via ``_restore_line``).
-#
-# The broad property tests in tests/test_fuzz_package.py widen their
-# accepted-exception set to exactly the subset above that each specific
-# entry point can reach, *in addition to* ``DOCUMENTED_EXCEPTIONS``, so they
-# keep giving a clean signal for genuinely new leaks (``KeyError``,
-# ``TypeError``, ``struct.error``, a hang, ...) without flaking on these
-# already-known, already-reported ones. ``tests/test_known_parser_gaps.py``
-# pins each one down exactly via a `strict` `xfail`, so narrowing either
-# tuple above (and deleting the corresponding `xfail`) is how a real fix
-# gets reflected here.
+# Parser gaps the fuzz suite once found (issue #86) are fixed: every reader
+# now raises only ``PackageError`` on malformed input. These tuples are kept,
+# empty, so the property tests keep one place to tolerate a newly discovered,
+# not-yet-fixed leak -- add the exception type here together with a pinned
+# ``xfail`` reproduction, and remove it again when the leak is fixed.
+ARRAY_LOAD_LEAK_TYPES: tuple[type[BaseException], ...] = ()
+ZIP_STRUCTURE_LEAK_TYPES: tuple[type[BaseException], ...] = ()
+ARTIST_RESTORE_LEAK_TYPES: tuple[type[BaseException], ...] = ()
 
 
 def simple_figure() -> Figure:
