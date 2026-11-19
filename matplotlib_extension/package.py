@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import tokenize
 import warnings
 import zipfile
 from collections.abc import Collection, Mapping, Sequence
@@ -279,6 +280,33 @@ _COLORMAP_NAMES: Final = frozenset(
     }
 )
 # Explicit allowlist of Matplotlib's own built-in AxesImage interpolation names.
+_NPY_MAGIC: Final = b"\x93NUMPY"
+
+# What Line2D.get_linestyle() can emit, plus Matplotlib's long names.
+_LINE_STYLE_NAMES: Final = frozenset(
+    {"-", "--", "-.", ":", "None", " ", "", "solid", "dashed", "dashdot", "dotted"}
+)
+
+# Matplotlib's named font weights; numeric weights are range-checked instead.
+_FONT_WEIGHT_NAMES: Final = frozenset(
+    {
+        "ultralight",
+        "light",
+        "normal",
+        "regular",
+        "book",
+        "medium",
+        "roman",
+        "semibold",
+        "demibold",
+        "demi",
+        "bold",
+        "heavy",
+        "extra bold",
+        "black",
+    }
+)
+
 _INTERPOLATION_NAMES: Final = frozenset(
     {
         "antialiased",
@@ -415,7 +443,14 @@ def _apply_text_spec(text: Text, spec: Mapping[str, Any]) -> None:
     text.set_fontstyle(_enum(spec, "fontstyle", {"normal", "italic", "oblique"}))
     text.set_fontvariant(_enum(spec, "fontvariant", {"normal", "small-caps"}))
     weight = spec.get("fontweight")
-    if not isinstance(weight, str | int | float) or isinstance(weight, bool):
+    if isinstance(weight, str):
+        if weight not in _FONT_WEIGHT_NAMES:
+            raise PackageError("fontweight is invalid")
+    elif (
+        not isinstance(weight, int | float)
+        or isinstance(weight, bool)
+        or not 0 <= weight <= 1000
+    ):
         raise PackageError("fontweight is invalid")
     text.set_fontweight(weight)  # type: ignore[arg-type]
     text.set_horizontalalignment(
@@ -1579,6 +1614,16 @@ def _read_json(data: bytes, name: str) -> Mapping[str, Any]:
     return value
 
 
+def _read_member(archive: zipfile.ZipFile, name: str) -> bytes:
+    # zipfile checks a local header against its central directory record
+    # lazily, on read, so the constructor's BadZipFile handling does not
+    # cover a ZIP whose two copies of an entry disagree.
+    try:
+        return archive.read(name)
+    except (zipfile.BadZipFile, ValueError, OSError, EOFError, RuntimeError) as exc:
+        raise PackageError(f"Invalid ZIP entry {name}") from exc
+
+
 def _validated_files(payload: bytes) -> tuple[Mapping[str, Any], dict[str, bytes]]:
     if len(payload) > MAX_PACKAGE_BYTES:
         raise PackageError("Figure package exceeds the size limit")
@@ -1610,7 +1655,7 @@ def _validated_files(payload: bytes) -> tuple[Mapping[str, Any], dict[str, bytes
                 raise PackageError("Compressed package entries are forbidden")
         if "manifest.json" not in names or "figure.json" not in names:
             raise PackageError("Required package files are missing")
-        manifest = _read_json(archive.read("manifest.json"), "manifest.json")
+        manifest = _read_json(_read_member(archive, "manifest.json"), "manifest.json")
         if (
             manifest.get("format") != PACKAGE_FORMAT
             or manifest.get("format_version") != PACKAGE_VERSION
@@ -1641,7 +1686,7 @@ def _validated_files(payload: bytes) -> tuple[Mapping[str, Any], dict[str, bytes
                 raise PackageError("Invalid manifest size")
             if path not in names:
                 raise PackageError("Manifest references a missing file")
-            data = archive.read(path)
+            data = _read_member(archive, path)
             if len(data) != size or hashlib.sha256(data).hexdigest() != digest:
                 raise PackageError(f"Integrity check failed for {path}")
             expected_names.add(path)
@@ -1727,9 +1772,14 @@ def recover_numeric_data(payload: bytes) -> list[dict[str, Any]]:
 def _load_array(files: Mapping[str, bytes], path: object) -> np.ndarray:
     if not isinstance(path, str) or not path.startswith("arrays/") or path not in files:
         raise PackageError("Invalid array reference")
+    # np.load() falls back to opening anything without the .npy magic as an
+    # .npz (zip) archive; only a plain .npy stream is part of the format.
+    if not files[path].startswith(_NPY_MAGIC):
+        raise PackageError(f"Invalid NumPy array {path}")
     try:
         array = np.load(BytesIO(files[path]), allow_pickle=False)
-    except (OSError, ValueError, EOFError) as exc:
+    except (OSError, ValueError, EOFError, tokenize.TokenError) as exc:
+        # TokenError: NumPy parses the header dict with Python's tokenizer.
         raise PackageError(f"Invalid NumPy array {path}") from exc
     if (
         not isinstance(array, np.ndarray)
@@ -1982,9 +2032,13 @@ def _restore_line(
         or marker not in MarkerStyle.markers
     ):
         raise PackageError("Invalid line marker")
+    xdata = _load_array(files, item.get("xdata"))
+    ydata = _load_array(files, item.get("ydata"))
+    if xdata.ndim != 1 or ydata.ndim != 1 or xdata.shape != ydata.shape:
+        raise PackageError("Line xdata and ydata must be 1-D arrays of equal length")
     line = Line2D(
-        _load_array(files, item.get("xdata")),
-        _load_array(files, item.get("ydata")),
+        xdata,
+        ydata,
         alpha=_optional_number(item, "alpha"),
         antialiased=_boolean(item, "antialiased"),
         color=_safe_color(item, "color"),
@@ -1996,7 +2050,7 @@ def _restore_line(
             {"default", "steps", "steps-pre", "steps-mid", "steps-post"},
         ),
         label=_string(item, "label", max_length=MAX_TEXT_LENGTH),
-        linestyle=_string(item, "linestyle", max_length=100),  # type: ignore[arg-type]
+        linestyle=_enum(item, "linestyle", _LINE_STYLE_NAMES),
         linewidth=_number(item, "linewidth", minimum=0, maximum=1_000_000),
         marker=marker,  # type: ignore[arg-type]
         markeredgecolor=_safe_color(item, "markeredgecolor"),
@@ -2043,17 +2097,22 @@ def _restore_scatter(
         color_kwargs["c"] = _load_array(files, color_item.get("values"))
         color_kwargs["cmap"] = _restore_colormap(color_item, "cmap")
         color_kwargs["norm"] = colors.Normalize(vmin=vmin, vmax=vmax)
-    collection = ax.scatter(
-        offsets[:, 0],
-        offsets[:, 1],
-        s=_load_array(files, item.get("sizes")),
-        marker=marker,  # type: ignore[arg-type]
-        linewidths=cast(Any, _load_array(files, item.get("linewidths"))),
-        edgecolors=cast(Any, _load_array(files, item.get("edgecolor"))),
-        alpha=_optional_number(item, "alpha"),
-        label=_string(item, "label", max_length=MAX_TEXT_LENGTH),
-        **color_kwargs,
-    )
+    # The array arguments are cross-validated (broadcast shapes, dtype,
+    # color-like values) by Matplotlib itself; translate its rejection.
+    try:
+        collection = ax.scatter(
+            offsets[:, 0],
+            offsets[:, 1],
+            s=_load_array(files, item.get("sizes")),
+            marker=marker,  # type: ignore[arg-type]
+            linewidths=cast(Any, _load_array(files, item.get("linewidths"))),
+            edgecolors=cast(Any, _load_array(files, item.get("edgecolor"))),
+            alpha=_optional_number(item, "alpha"),
+            label=_string(item, "label", max_length=MAX_TEXT_LENGTH),
+            **color_kwargs,
+        )
+    except (ValueError, TypeError) as exc:
+        raise PackageError("Invalid scatter data") from exc
     collection.set_visible(_boolean(item, "visible"))
     collection.set_zorder(
         _number(item, "zorder", minimum=-1_000_000, maximum=1_000_000)
@@ -2076,15 +2135,19 @@ def _restore_image(
         color_kwargs["norm"] = colors.Normalize(
             vmin=_number(color_item, "vmin"), vmax=_number(color_item, "vmax")
         )
-    image = ax.imshow(
-        data,
-        extent=(extent[0], extent[1], extent[2], extent[3]),
-        origin=origin,
-        interpolation=interpolation,
-        alpha=_optional_number(item, "alpha"),
-        label=_string(item, "label", max_length=MAX_TEXT_LENGTH),
-        **color_kwargs,
-    )
+    # imshow() validates the array's shape and dtype; translate its rejection.
+    try:
+        image = ax.imshow(
+            data,
+            extent=(extent[0], extent[1], extent[2], extent[3]),
+            origin=origin,
+            interpolation=interpolation,
+            alpha=_optional_number(item, "alpha"),
+            label=_string(item, "label", max_length=MAX_TEXT_LENGTH),
+            **color_kwargs,
+        )
+    except (ValueError, TypeError) as exc:
+        raise PackageError("Invalid image data") from exc
     image.set_visible(_boolean(item, "visible"))
     image.set_zorder(_number(item, "zorder", minimum=-1_000_000, maximum=1_000_000))
 
@@ -2101,7 +2164,7 @@ def _restore_patch(
         "fill": _boolean(item, "fill"),
         "hatch": _optional_string(item, "hatch", max_length=100),
         "label": _string(item, "label", max_length=MAX_TEXT_LENGTH),
-        "linestyle": _string(item, "linestyle", max_length=100),
+        "linestyle": _enum(item, "linestyle", _LINE_STYLE_NAMES),
         "linewidth": _number(item, "linewidth", minimum=0, maximum=1_000_000),
     }
     patch: Patch
