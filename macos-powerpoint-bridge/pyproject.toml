@@ -1,0 +1,46 @@
+[project]
+name = "macos-powerpoint-bridge"
+version = "0.1.0"
+description = "macOS-only, extraction-only bridge for the selected embedded OLE Figure in PowerPoint for Mac"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib-extension",
+]
+
+[project.scripts]
+macos-powerpoint-bridge = "macos_powerpoint_bridge.cli:main"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.0",
+    "pytest>=8.0.0",
+    "ruff>=0.4.0",
+]
+
+[tool.uv.sources]
+matplotlib-extension = { path = "..", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["macos_powerpoint_bridge"]

@@ -64,7 +64,7 @@ The native file embedded in the OLE Package is itself `figure.mpl.png`. On Windo
 
 If the generic OLE Package operations cannot save the native file reliably, a Windows extraction/export-only verb or adapter may be added. Such an adapter only copies the embedded editable PNG to a file; it never restores or edits a Figure. All editing remains in Python.
 
-On macOS, the workflow does not depend on Windows OLE activation or verbs. An extraction-only PowerPoint bridge obtains the user-selected OLE shape and a copy of the current PPTX through PowerPoint APIs, resolves its internal OLE object, unwraps the native PNG, and saves `figure.mpl.png`. Python never receives the whole PPTX to guess the target, and the bridge never restores or edits a Figure.
+On macOS, the workflow does not depend on Windows OLE activation or verbs. A separately distributed, extraction-only PowerPoint bridge ([`macos-powerpoint-bridge/`](macos-powerpoint-bridge/)) reads the shape currently selected in PowerPoint for Mac, resolves it to its embedded OLE part by walking the package's own OOXML relationships, and saves only `figure.mpl.png`. It never scans the whole PPTX to guess the target, never calls PowerPoint's `save` command on the live document (which behaves like Save As and would rebind it), and never restores or edits a Figure.
 
 The standalone API also supports atomic overwrite and exclusive creation:
 
