@@ -10,6 +10,7 @@ the Shape-to-OOXML-relationship mapping the bridge relies on. Mirrors
 | `multi_figure.pptx` | `generate_originals.py` (reproducible; never opened in PowerPoint) |
 | `single_figure_powerpoint_resaved.pptx` | `single_figure.pptx`, opened and resaved via COM (`Presentation.SaveCopyAs`) in real PowerPoint for Windows (16.0 / Microsoft 365) by the main session, relayed via the shared notes folder |
 | `multi_figure_powerpoint_resaved.pptx` | `multi_figure.pptx`, same as above |
+| `multi_figure_powerpoint_reordered.pptx` | `multi_figure.pptx`, opened in real PowerPoint for Windows 16.0 (build 20527), slide 3 moved to the front with `Slide.MoveTo(1)`, then saved (issue #91); slide order is Figure 3, Figure 1, Figure 2 |
 
 Unlike `tests/fixtures/powerpoint_mac/`'s own resaved fixtures, these
 two were not captured by this implementing session's own hands: this
@@ -85,12 +86,6 @@ rebind anything when actually run.
 
 ## Not yet confirmed
 
-- Slide reordering: not exercised against a real "drag slide 3 to the
-  front, then resave" pass -- `test_resolves_correctly_after_slides_are_reordered`
-  in `test_relationship.py` edits `multi_figure_powerpoint_resaved.pptx`'s
-  own `sldIdLst` in memory rather than using a second real-PowerPoint
-  reorder-and-resave fixture (same caveat the macOS bridge's own
-  fixtures have).
 - Only tested against PowerPoint for Windows 16.0 (Microsoft 365,
   current as of 2026-11-19). Not tested against older perpetual-license
   PowerPoint for Windows versions.
