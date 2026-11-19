@@ -95,6 +95,24 @@ uv run macos-powerpoint-bridge DESTINATION.mpl.png
   `progId`; any other count, or disagreement between copies, rejects
   the package.
 
+## Confirmed against real PowerPoint (issue #91)
+
+Also confirmed on real PowerPoint for Mac 16.112 (build 16.112.26081010,
+Microsoft 365), driving the actual `read_selection()` and relationship
+resolver, not mocked responses:
+
+- Slide reordering: after a real "move a slide to the front, then
+  save" pass, the relationship resolver still extracts the right
+  figure for every slide (`multi_figure_powerpoint_reordered.pptx` is
+  that real file, and `test_resolves_the_real_powerpoint_reordered_fixture`
+  pins it).
+- Rejection, each failing closed with a `BridgeError` and no output
+  file: a real two-shape selection (two shapes selected on one slide)
+  and a real empty selection (`selection type none`).
+
+See `../tests/fixtures/powerpoint_mac/README.md`'s matching section
+for the exact AppleScript/UI steps used.
+
 ## What this tool will never do
 
 - Deserialize, restore, or construct a `Figure`.
@@ -117,6 +135,8 @@ uv run macos-powerpoint-bridge DESTINATION.mpl.png
 
 ## Supported versions
 
-Only PowerPoint for Mac 16.112.4 (Microsoft 365) is verified. Older
-perpetual-license versions are out of scope (not tested, not supported);
-a presentation whose structure differs from the fixtures fails closed.
+Only PowerPoint for Mac 16.112.x (Microsoft 365) is verified: 16.112.4
+for the relationship-mapping fixtures, 16.112.26081010 for the issue
+#91 reorder and selection-rejection pass above. Older perpetual-license
+versions are out of scope (not tested, not supported); a presentation
+whose structure differs from the fixtures fails closed.
