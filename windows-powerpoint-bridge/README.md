@@ -113,23 +113,8 @@ commands):
   committed fixture resolves to exactly the pre-resave bytes, for every
   slide of both fixtures), not just relayed as a claim.
 
-**Not yet confirmed** (see the handoff notes for details and current
-status):
+**Not yet confirmed**:
 
-- Whether `GetActiveObject` can see an interactively, user-driven
-  PowerPoint session's selection from the process that would run this
-  tool, or whether Windows session isolation blocks it. **This is the
-  one open question that could force a design change** if it comes
-  back negative -- see "Fallback if COM can't see an interactive
-  selection" below for why it likely still wouldn't block real usage
-  even then. Confirmed so far: it fails with `MK_E_UNAVAILABLE`
-  (`0x800401E3`) when called from an SSH/automation session (a
-  *different* Windows session than the interactive desktop) -- exactly
-  the cross-session isolation expected, and not evidence either way
-  about same-session use. Tracked as
-  [issue #89](https://github.com/y-marui/python-matplotlib-extension/issues/89),
-  which needs a session running directly on the Windows machine itself
-  to test from within the interactive session.
 - `Selection.SlideRange`'s behavior for a `ppSelectionShapes`-type
   selection specifically.
 - Slide reordering, against a real "drag slide 3 to the front, then
@@ -137,24 +122,20 @@ status):
   fixture's `sldIdLst` in memory -- same caveat the macOS bridge's own
   fixtures have).
 
-## Fallback if COM can't see an interactive selection
+## Interactive-session COM access (confirmed)
 
-The empirical check for the open question above is being run from an
-automation/SSH session (Windows session 0, a service-type session),
-which is a different Windows session than the interactive desktop
-session (e.g. session 2) PowerPoint actually runs in -- so
-`GetActiveObject` may fail there purely as an artifact of *how that
-check is being run*, not of this tool's design. This tool itself is
-meant to be run by the end user, from their own interactive session,
-at the same time as PowerPoint -- the same session, by construction.
-In that deployment, `GetActiveObject` has no cross-session boundary to
-cross: a script run from a PowerShell/terminal window the user opened
-themselves, in the same desktop session as PowerPoint, should see the
-Running Object Table entry PowerPoint registers there. If this still
-needs independent confirmation, the way to get it is to have a user
-run the check *from inside* that same interactive session (not via
-remote automation) -- see the handoff notes for a ready-to-paste
-PowerShell snippet for that.
+Confirmed on a real Windows machine ([issue #89](https://github.com/y-marui/python-matplotlib-extension/issues/89)):
+run from a process in the same interactive desktop session as
+PowerPoint, `GetActiveObject("PowerPoint.Application")` -- both
+Windows PowerShell 5.1's `Marshal.GetActiveObject` and pywin32's
+`win32com.client.GetActiveObject` -- reads the live selection
+(`Selection.Type == 2`, the OLE shape's `Type == 7`, the slide index).
+From a different session (SSH/service, session 0) it fails with
+`MK_E_UNAVAILABLE` (`0x800401E3`), because the Running Object Table is
+per-session; the bridge is meant to be run by the user from their own
+desktop session, so that case is out of scope. PowerShell 7 (.NET Core)
+has no `Marshal.GetActiveObject`; use Windows PowerShell 5.1 or this
+Python tool.
 
 ## What this tool will never do
 

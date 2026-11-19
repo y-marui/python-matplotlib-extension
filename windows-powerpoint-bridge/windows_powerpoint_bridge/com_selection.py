@@ -26,26 +26,13 @@ install on macOS/Linux; importing it lazily lets this module -- and
 everything that imports it, including the test suite -- load on any
 platform, with the actual COM call only ever attempted on Windows.
 
-UNCONFIRMED and the one open question that could force a redesign of
-this module (tracked in
-`issue #89 <https://github.com/y-marui/python-matplotlib-extension/issues/89>`_):
-whether an interactively, user-driven PowerPoint selection on a real
-desktop session is visible to ``GetActiveObject`` from the process
-that would run this bridge, or whether Windows session isolation (a
-different Windows session, e.g. an SSH/service session vs. the
-interactive desktop session) hides it. Confirmed so far: calling it
-from an SSH/automation session (a different Windows session than the
-interactive desktop) fails with ``MK_E_UNAVAILABLE``
-(``0x800401E3``) -- expected, and not evidence either way about
-same-session use. This bridge is designed to be *run by the end user
-from their own interactive session*, at the same time as PowerPoint --
-the same session, by construction -- so a same-session
-``GetActiveObject`` call should see the Running Object Table entry
-PowerPoint registers there regardless of how this question resolves
-for a *different*, automation-driven session trying to reach across a
-session boundary it was never designed to cross. Issue #89 needs a
-session running directly on the Windows machine itself to settle this
-with real evidence.
+CONFIRMED on a real Windows machine (issue #89): from a process in the
+same interactive desktop session as PowerPoint, ``GetActiveObject``
+(both pywin32 and Windows PowerShell 5.1) reads the live selection.
+From a different session (SSH/service) it fails with
+``MK_E_UNAVAILABLE`` (``0x800401E3``) because the Running Object Table
+is per-session; this bridge is meant to be run by the user from their
+own interactive session, so that case is out of scope.
 
 Also UNCONFIRMED: that ``Selection.SlideRange`` resolves correctly for
 a ``ppSelectionShapes``-type selection (as opposed to only a
