@@ -1,3 +1,4 @@
+import struct
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -8,7 +9,11 @@ from matplotlib_extension.package import load_package
 from matplotlib_extension.pyplot import extract_editable_png
 
 from macos_powerpoint_bridge.errors import BridgeError
-from macos_powerpoint_bridge.relationship import resolve_ole_part
+from macos_powerpoint_bridge.relationship import (
+    MAX_OLE_MEMBER_BYTES,
+    MAX_XML_MEMBER_BYTES,
+    resolve_ole_part,
+)
 
 FIXTURES = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "powerpoint_mac"
 
@@ -24,6 +29,43 @@ def _rewrite_zip(data: bytes, replacements: dict[str, bytes]) -> bytes:
             content = replacements.get(info.filename, source.read(info.filename))
             destination.writestr(info.filename, content)
     return output.getvalue()
+
+
+def _inflate_declared_size(payload: bytes, member: str, declared_size: int) -> bytes:
+    """Rewrite *payload*'s local+central directory records for *member* so
+    both claim ``declared_size`` uncompressed bytes, without changing the
+    actual bytes on disk -- the same "tiny compressed size, huge declared
+    size" shape as a real zip-bomb member, without committing or allocating
+    a multi-hundred-megabyte fixture just to exceed a size limit for real.
+    """
+    data = bytearray(payload)
+    with zipfile.ZipFile(BytesIO(payload)) as archive:
+        info = archive.getinfo(member)
+        local_offset = info.header_offset
+
+    # Local file header: sig(4) ver(2) flags(2) method(2) time(2) date(2)
+    # crc32(4) compressed_size(4) uncompressed_size(4) name_len(2) extra_len(2)
+    struct.pack_into("<I", data, local_offset + 22, declared_size)
+
+    # Central directory record: compressed_size at +20, uncompressed_size at
+    # +24, filename_length at +28, filename starts at +46.
+    needle = info.filename.encode("utf-8")
+    cd_offset = 0
+    found = False
+    while True:
+        cd_offset = data.find(b"PK\x01\x02", cd_offset)
+        if cd_offset < 0:
+            break
+        name_length = struct.unpack_from("<H", data, cd_offset + 28)[0]
+        candidate = bytes(data[cd_offset + 46 : cd_offset + 46 + name_length])
+        if candidate == needle:
+            struct.pack_into("<I", data, cd_offset + 24, declared_size)
+            found = True
+            break
+        cd_offset += 4
+    if not found:
+        raise AssertionError(f"central directory record for {member!r} not found")
+    return bytes(data)
 
 
 @pytest.mark.parametrize(
@@ -191,3 +233,25 @@ def test_resolves_correctly_after_slides_are_reordered() -> None:
     # must now be rejected, confirming the resolver is not using it.
     with pytest.raises(BridgeError, match="does not match the selected shape"):
         resolve_ole_part(reordered_data, slide_index=1, shape_name="Figure 1")
+
+
+def test_rejects_an_oversized_ole_embedding_before_decompressing_it() -> None:
+    """A ZIP member whose declared uncompressed size exceeds the limit must
+    be rejected from its metadata alone, before any bytes are decompressed
+    -- otherwise a tiny, highly-compressed member could claim an enormous
+    uncompressed size (a zip bomb) and exhaust memory first."""
+    data = (FIXTURES / "single_figure.pptx").read_bytes()
+    inflated = _inflate_declared_size(
+        data, "ppt/embeddings/oleObject1.bin", MAX_OLE_MEMBER_BYTES + 1
+    )
+    with pytest.raises(BridgeError, match="exceeds the size limit"):
+        resolve_ole_part(inflated, slide_index=1, shape_name="Figure 1")
+
+
+def test_rejects_an_oversized_xml_member_before_decompressing_it() -> None:
+    data = (FIXTURES / "single_figure.pptx").read_bytes()
+    inflated = _inflate_declared_size(
+        data, "ppt/presentation.xml", MAX_XML_MEMBER_BYTES + 1
+    )
+    with pytest.raises(BridgeError, match="exceeds the size limit"):
+        resolve_ole_part(inflated, slide_index=1, shape_name="Figure 1")

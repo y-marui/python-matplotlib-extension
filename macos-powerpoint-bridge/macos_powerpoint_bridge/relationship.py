@@ -34,6 +34,8 @@ import zipfile
 from io import BytesIO
 from xml.etree import ElementTree
 
+from matplotlib_extension.container import MAX_OLE_BYTES
+
 from macos_powerpoint_bridge.errors import BridgeError
 
 _P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
@@ -52,19 +54,33 @@ _OLE_PROG_ID = "Package"
 _EMBEDDED_OLE_TARGET_RE = re.compile(r"^\.\./embeddings/oleObject[1-9][0-9]*\.bin$")
 
 MAX_PRESENTATION_BYTES = 256 * 1024 * 1024
+# The XML parts this module reads (presentation.xml, one slide, its rels,
+# Content_Types.xml) are small, fixed-shape package metadata; 16 MiB matches
+# this project's own JSON-entry size limit (docs/EDITABLE_FORMAT.md's
+# "Resource Limits").
+MAX_XML_MEMBER_BYTES = 16 * 1024 * 1024
+# The embedded OLE part must satisfy matplotlib_extension's own MAX_OLE_BYTES
+# limit regardless; checking it here, before decompressing, means a crafted
+# ZIP member whose *compressed* size is tiny but *uncompressed* size is huge
+# is rejected without first allocating its full expansion in memory.
+MAX_OLE_MEMBER_BYTES = MAX_OLE_BYTES
 
 
-def _read_member(archive: zipfile.ZipFile, name: str) -> bytes:
+def _read_member(archive: zipfile.ZipFile, name: str, *, max_bytes: int) -> bytes:
     try:
-        return archive.read(name)
+        info = archive.getinfo(name)
     except KeyError as exc:
         raise BridgeError(f"Presentation package is missing {name}") from exc
+    if info.file_size > max_bytes:
+        raise BridgeError(f"Presentation package entry {name} exceeds the size limit")
+    try:
+        return archive.read(info)
     except (zipfile.BadZipFile, RuntimeError, NotImplementedError) as exc:
         raise BridgeError(f"Presentation package entry {name} is corrupt") from exc
 
 
 def _read_xml(archive: zipfile.ZipFile, name: str) -> ElementTree.Element:
-    data = _read_member(archive, name)
+    data = _read_member(archive, name, max_bytes=MAX_XML_MEMBER_BYTES)
     try:
         return ElementTree.fromstring(data)
     except ElementTree.ParseError as exc:
@@ -309,4 +325,6 @@ def resolve_ole_part(pptx_bytes: bytes, *, slide_index: int, shape_name: str) ->
                 f"Expected exactly one {embedding_part} entry in the "
                 f"package, found {len(matching_members)}"
             )
-        return _read_member(archive, matching_members[0].filename)
+        return _read_member(
+            archive, matching_members[0].filename, max_bytes=MAX_OLE_MEMBER_BYTES
+        )
