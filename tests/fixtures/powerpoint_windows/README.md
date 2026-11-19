@@ -84,8 +84,9 @@ rebind anything when actually run.
   preserved unchanged, same as the original and same as PowerPoint for
   Mac's own resave.
 
-## Not yet confirmed
+## Supported versions
 
-- Only tested against PowerPoint for Windows 16.0 (Microsoft 365,
-  current as of 2026-11-19). Not tested against older perpetual-license
-  PowerPoint for Windows versions.
+Only PowerPoint for Windows 16.0 as shipped with Microsoft 365 (build
+20527, 2026-11-19) is verified. Older perpetual-license versions are out
+of scope: they are not tested and not supported, and anything whose
+structure differs from these fixtures fails closed.
