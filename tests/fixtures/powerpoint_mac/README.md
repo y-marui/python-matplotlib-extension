@@ -79,6 +79,13 @@ As with the `*_powerpoint_resaved.pptx` fixtures, `move` is only ever
 used here for fixture collection; the bridge itself never reorders,
 edits, or saves the user's live presentation.
 
+**Caveat for any future ad hoc AppleScript against this app:**
+`repeat with x in <collection>` (e.g. `slides of thePres`) can hang
+indefinitely in PowerPoint for Mac's AppleScript implementation — it
+was observed to exceed a 120-second timeout even for a 3-slide
+presentation. Use `repeat with i from 1 to (count of <collection>)`
+with `item i of <collection>` instead, which returns instantly.
+
 ## What was empirically confirmed against PowerPoint 16.112.4
 
 - The embedded `ppt/embeddings/oleObjectN.bin` bytes, and the fallback
