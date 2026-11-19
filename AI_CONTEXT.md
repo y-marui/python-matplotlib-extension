@@ -8,7 +8,7 @@ matplotlib の拡張ライブラリ。data-only canonical package を埋め込�
 
 editable graphicsは通常形式と目視で区別できる`.mpl.png`・`.mpl.pdf`・`.mpl.svg`を使う。OLE/presentation連携のuser-facingな受け渡し形式は、Windows・Macとも通常に開ける`figure.mpl.png`へ統一する。OLEのnative file自体をこのPNGとし、raw `.bin`と`.mplpkg`は内部形式に限定する。Python側でPPTXを走査して対象objectを推測しない。汎用Packageの操作が不十分な場合は抽出専用verb/adapterを追加できるが、restore・編集・埋め込みコード実行は行わない。
 
-Macでは抽出専用PowerPoint bridgeが選択済みOLE ShapeとPowerPoint APIから得た一時PPTXコピーを使い、対応する内部OLE objectからnative editable PNGだけをローカル抽出する。ShapeとOOXML relationshipの対応はfixtureで検証し、複数objectから推測しない。bridgeはpresentationをdefaultでuploadせず、Figureをrestore・編集しない。
+Macでは別配布の抽出専用PowerPoint bridge（`macos-powerpoint-bridge/`）が、read-only AppleScriptで選択済みOLE Shapeを読み取り、既に保存済みのpresentation fileをread-onlyでコピーして使い、対応する内部OLE objectからnative editable PNGだけをローカル抽出する。PowerPointの汎用`save`コマンドはSave Asと同様にliveなdocument windowを対象fileへ付け替えてしまうため、live documentには一切呼ばない。ShapeとOOXML relationshipの対応は実PowerPointから採取したfixture（`tests/fixtures/powerpoint_mac/`）で検証し、複数objectから推測しない。slideはpresentation.xmlのslide ID listを辿って解決し、slideN.xmlのファイル名numberとAppleScriptのslide indexが一致するという前提を置かない（slide並べ替え後も正しく解決する）。bridgeはpresentationをdefaultでuploadせず、Figureをrestore・編集しない。
 
 PPTX package生成とOLE bytesの埋め込みはportable OOXML処理としてMac・Linux・Windowsで可能にし、Windows COMやPowerPointを生成要件にしない。OS依存なのはactivationとselected-object exportである。restore/parser/presentation bridgeはdenylistでなくpositive exact allowlistを原則とし、Shape type、relationship/content type、normalized target、CFB stream、native filename、container/schema tag、class/dtype等が未知・追加・曖昧なら推測せず拒否する。
 
@@ -18,8 +18,10 @@ PPTX package生成とOLE bytesの埋め込みはportable OOXML処理としてMac
 - **ツール:** ruff（lint/format）, mypy（型チェック）, pytest
 - **主要ディレクトリ:**
   - `matplotlib_extension/` — ライブラリ本体（pyplot.py, label_string.py, *.mplstyle）
-  - `tests/` — pytest テスト
+  - `tests/` — pytest テスト（`tests/fixtures/powerpoint_mac/` は実PowerPoint for Macから採取したfixture）
   - `docs/dev-charter/` — 開発憲章（git subtree）
+  - `macos-powerpoint-bridge/` — 別配布・macOS専用・抽出専用のPowerPoint bridge（独立したpyproject、本体への依存は一方向）
+  - `legacy-migration-tool/` — 別配布・非推奨の legacy `.plt.pdf` 移行ツール（独立したpyproject）
 
 ## Applied Charter Principles
 
