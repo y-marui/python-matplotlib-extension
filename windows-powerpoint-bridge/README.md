@@ -113,14 +113,23 @@ commands):
   committed fixture resolves to exactly the pre-resave bytes, for every
   slide of both fixtures), not just relayed as a claim.
 
+Also confirmed on a real PowerPoint for Windows (16.0 build 20527,
+Microsoft 365), driving the CLI end to end from the same interactive
+session (issue #91):
+
+- Slide reordering: after a real `Slide.MoveTo(1)` of slide 3 and a
+  save, selecting each slide's shape extracts the right figure
+  (`multi_figure_powerpoint_reordered.pptx` is that real file, and
+  `test_resolves_the_real_powerpoint_reordered_fixture` pins it).
+- `Selection.SlideRange` for a `ppSelectionShapes` selection reports
+  exactly one slide with the correct `SlideIndex`.
+- Rejection, each failing closed with a `BridgeError` and no output
+  file: no selection (`Selection.Type` 0), a slide selection (type 1),
+  two shapes selected on one slide, and an unsaved presentation.
+
 **Not yet confirmed**:
 
-- `Selection.SlideRange`'s behavior for a `ppSelectionShapes`-type
-  selection specifically.
-- Slide reordering, against a real "drag slide 3 to the front, then
-  resave" pass (covered only by a synthetic test that edits the real
-  fixture's `sldIdLst` in memory -- same caveat the macOS bridge's own
-  fixtures have).
+- Older perpetual-license PowerPoint for Windows versions.
 
 ## Interactive-session COM access (confirmed)
 

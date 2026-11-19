@@ -34,11 +34,10 @@ From a different session (SSH/service) it fails with
 is per-session; this bridge is meant to be run by the user from their
 own interactive session, so that case is out of scope.
 
-Also UNCONFIRMED: that ``Selection.SlideRange`` resolves correctly for
-a ``ppSelectionShapes``-type selection (as opposed to only a
-``ppSelectionSlides``-type one). The PowerPoint object model documents
-``SlideRange`` as valid for any selection, but this has not been
-checked against a real running PowerPoint for Windows.
+Also CONFIRMED (issue #91): ``Selection.SlideRange`` resolves exactly
+one slide with the right ``SlideIndex`` for a ``ppSelectionShapes``
+selection, including after a real slide reorder; no selection, a slide
+selection, and a two-shape selection are all rejected here.
 """
 
 from __future__ import annotations
