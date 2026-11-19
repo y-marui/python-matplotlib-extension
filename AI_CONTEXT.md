@@ -10,6 +10,8 @@ editable graphicsは通常形式と目視で区別できる`.mpl.png`・`.mpl.pd
 
 Macでは抽出専用PowerPoint bridgeが選択済みOLE ShapeとPowerPoint APIから得た一時PPTXコピーを使い、対応する内部OLE objectからnative editable PNGだけをローカル抽出する。ShapeとOOXML relationshipの対応はfixtureで検証し、複数objectから推測しない。bridgeはpresentationをdefaultでuploadせず、Figureをrestore・編集しない。
 
+Windowsでは抽出専用PowerPoint bridge（`windows-powerpoint-bridge/`）が、稼働中のPowerPoint for Windowsへの読み取り専用COM automationで選択済みOLE Shapeを取得し、presentationの保存済みファイルからOOXML relationshipを解決して、対応する内部OLE objectからnative editable PNGだけをローカル抽出する。汎用のShape export（「図として保存」）はnative fileを保持しないことを実機で確認済みのため使用しない。bridgeはpresentationをdefaultでuploadせず、Figureをrestore・編集しない。
+
 PPTX package生成とOLE bytesの埋め込みはportable OOXML処理としてMac・Linux・Windowsで可能にし、Windows COMやPowerPointを生成要件にしない。OS依存なのはactivationとselected-object exportである。restore/parser/presentation bridgeはdenylistでなくpositive exact allowlistを原則とし、Shape type、relationship/content type、normalized target、CFB stream、native filename、container/schema tag、class/dtype等が未知・追加・曖昧なら推測せず拒否する。
 
 - **言語:** Python 3.11+

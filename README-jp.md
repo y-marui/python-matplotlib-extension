@@ -60,9 +60,9 @@ fig = loadfig("figure.mpl.png")
 extract_editable_png("oleObject1.bin", "figure.mpl.png")
 ~~~
 
-OLE Packageへ埋め込むnative file自体を`figure.mpl.png`とする。Windowsでは標準OLE操作または抽出専用adapterがこのnative PNGを保存する。Python側でPPTX全体を走査して対象objectを推測する機能は提供しない。
+OLE Packageへ埋め込むnative file自体を`figure.mpl.png`とする。標準のPowerPoint export verb（`Shape.Export`／「図として保存」）はこのnative PNGを保存しない。実際にはShapeを再レンダリングした別のファイルになる。Python側でPPTX全体を走査して対象objectを推測する機能は提供しない。
 
-汎用OLE Packageの標準操作だけで安定して保存できない場合は、Windows向けに抽出・export専用のverbまたはadapterを追加できる。ただし、それは埋め込みeditable PNGをファイルへコピーするだけであり、Figureのrestoreや編集は行わない。編集処理は引き続きPythonだけで行う。
+Windowsでは、別配布の抽出専用ブリッジ（[`windows-powerpoint-bridge/`](windows-powerpoint-bridge/)）が、稼働中のPowerPoint for Windowsへの読み取り専用COM automationでユーザーの選択したOLE Shapeを取得し、presentationの保存済みファイル内でそのOOXML/OLE relationshipを解決して、`figure.mpl.png`だけを保存する。このブリッジはFigureのrestoreや編集を行わず、稼働中のpresentationを保存・exportするなど変更する操作も一切行わない。編集処理は引き続きPythonだけで行う。
 
 MacではWindows OLEのactivationやverbに依存しない。PowerPoint用の抽出専用ブリッジが、ユーザーの選択したOLE Shapeと現在のPPTXコピーをPowerPoint APIから取得し、そのShapeが参照する内部OLE objectからnative PNGを取り出して`figure.mpl.png`として保存する。PPTX全体をPythonへ渡して対象を推測させず、ブリッジ内でもFigureのrestoreや編集は行わない。
 
