@@ -122,7 +122,7 @@ def embed_pdf(rendered: bytes, payload: bytes, *, title: str = "Figure") -> byte
         writer = PdfWriter(clone_from=reader)
         writer.add_attachment(PDF_ATTACHMENT, payload)
         if len(writer.pages):
-            writer.add_outline_item(title, 0)
+            writer.add_outline_item(title=title, page_number=0)
         output = BytesIO()
         writer.write(output)
     except Exception as exc:
